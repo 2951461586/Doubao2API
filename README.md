@@ -135,6 +135,75 @@ curl http://127.0.0.1:10086/v1/chat/completions \
   -d '{"model":"doubao-think","messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
+### 3.4 Docker 一键部署
+
+镜像只打包一个静态 Go 二进制（≈ 6 MB），构建阶段不需要联网拉依赖
+（纯标准库，`go.mod` 无 require）。
+
+```bash
+# 1) 构建并启动
+docker compose up -d --build
+
+# 2) 看日志
+docker compose logs -f
+
+# 3) 打开服务
+#    http://127.0.0.1:10086/health
+```
+
+也可以直接 `docker run`：
+
+```bash
+docker build -t doubao2api:latest .
+
+docker run -d --name doubao2api --restart unless-stopped \
+  -p 127.0.0.1:10086:10086 \
+  -v "$PWD/data:/data" \
+  -e TZ=Asia/Shanghai \
+  doubao2api:latest -no-import
+```
+
+要点：
+
+| 项 | 说明 |
+| --- | --- |
+| 状态卷 | `./data:/data`，`DOUBAO_DATA_PATH=/data/doubao2api-data.json` |
+| **卷里含凭据** | `doubao2api-data.json` 等同账号密码，**不要提交或分享** |
+| 端口 | compose 默认绑 `127.0.0.1`；要局域网访问改成 `"10086:10086"` |
+| 时区 | `TZ=Asia/Shanghai`，否则日志与统计按 UTC 算 |
+| 出网 | 容器需能访问 `www.doubao.com` |
+| 健康检查 | `GET /ping`（免鉴权） |
+| 自动导入 | 容器内**不可用**（DPAPI 是 Windows 专有），故用 `-no-import` 启动 |
+
+#### 容器内如何添加账号
+
+容器里没有桌面端，因此**不能自动导入**，改用「手工录入 Cookie」：
+
+1. 在**有桌面端的机器**上登录豆包，用浏览器 DevTools 或导出工具
+   复制 `.doubao.com` 域的 Cookie 串，至少包含
+   `sessionid`（或 `sid_guard`）、`ttwid`、`passport_csrf_token`。
+2. POST 到控制台接口：
+
+    ```bash
+    curl -X POST http://127.0.0.1:10086/admin/api/accounts \
+      -H "Content-Type: application/json" \
+      -d '{
+            "action": "manual",
+            "name": "我的账号",
+            "cookies": "sessionid=xxx; sid_guard=xxx; ttwid=xxx; passport_csrf_token=xxx"
+          }'
+    ```
+
+3. 验证连通性：
+
+    ```bash
+    curl -X POST http://127.0.0.1:10086/admin/api/checkin \
+      -H "Content-Type: application/json" -d '{}'
+    ```
+
+> 未提供 `device_id` / `web_id` 时网关会生成随机占位值（上游可接受）。
+> 若上游启用风控并返回 `gateway-error`，请在桌面端重新登录后重新导出 Cookie。
+
 ---
 
 ## 四、端点
@@ -331,3 +400,26 @@ doubao2api/
   体积大且含第三方版权内容，已加入 `.gitignore`，仅作本地协议比对。
 - 上游可能随时调整协议或启用风控。若出现 `gateway-error`，
   请重新登录桌面端后重新导入账号。
+
+---
+
+## 十、许可证
+
+本项目以 [Apache License 2.0](LICENSE) 授权发布。
+
+```text
+Copyright 2026 Lizi
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+```
+
+许可证覆盖的是**本项目自身的代码**。逆向过程中接触到的第三方内容
+（豆包客户端二进制、`biz.pak` 解包产物、source map 还原出的源码）
+不包含在本仓库内，其权利仍归原权利人。
+
+> 许可与使用限制是两件事：Apache-2.0 授予你使用、修改、分发本代码的权利，
+> 但并不豁免你对上游服务条款的义务。请遵守第九节的注意事项。

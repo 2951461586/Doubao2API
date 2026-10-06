@@ -1,0 +1,28 @@
+# 构建上下文瘦身：只保留编译所需内容
+
+# 逆向产物（体积大，且含第三方源码）
+.recon/
+extract/
+
+# 运行期状态与日志（含账号凭据）
+data/
+doubao2api-data.json
+*.log
+
+# 构建产物
+doubao2api
+doubao2api.exe
+*.exe
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+
+# 文档与示例（构建不需要）
+README.md
+LICENSE
+doubao2api-data.example.json
+docker-compose.yml

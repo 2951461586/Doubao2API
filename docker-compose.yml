@@ -1,0 +1,40 @@
+---
+# Doubao2API 一键部署
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# 控制台与 API：http://127.0.0.1:10086/
+
+services:
+  doubao2api:
+    build: .
+    image: doubao2api:latest
+    container_name: doubao2api
+    restart: unless-stopped
+
+    # 默认只绑本机，避免无意暴露到局域网。
+    # 需要局域网访问时改成 "10086:10086"。
+    ports:
+      - "127.0.0.1:10086:10086"
+
+    volumes:
+      # 状态文件（含账号 Cookie 与 API 密钥）落在这里，等同账号密码，注意保密
+      - ./data:/data
+
+    environment:
+      TZ: Asia/Shanghai
+      DOUBAO_HOST: 0.0.0.0
+      DOUBAO_PORT: "10086"
+      DOUBAO_DATA_PATH: /data/doubao2api-data.json
+
+    # 容器内没有 Windows 桌面端，DPAPI 不可用，因此关闭自动导入；
+    # 账号请通过控制台 API 手工录入 Cookie（见 README「Docker 部署」）。
+    command: ["-no-import"]
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10086/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

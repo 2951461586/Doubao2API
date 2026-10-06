@@ -92,6 +92,14 @@ func regexpDeviceID() *regexp.Regexp {
 	return regexp.MustCompile(`device_id":"(\d{15,20})`)
 }
 
+// defaultFP 生成一个形如上游 fp 参数的指纹占位值。
+//
+// 注意：必须放在跨平台文件中——Linux 构建（Docker）下没有
+// cookie_windows.go，但手工录入账号同样需要该函数。
+func defaultFP() string {
+	return "verify_" + RandomHex(5) + "_" + RandomHex(5) + "_" + RandomHex(4) + "_" + RandomHex(4) + "_" + RandomHex(4) + "_" + RandomHex(10)
+}
+
 // ParseCookieString 解析手工粘贴的 Cookie 串。
 //
 // 接受 `a=1; b=2` 或每行一条的格式（从浏览器 DevTools 直接复制）。

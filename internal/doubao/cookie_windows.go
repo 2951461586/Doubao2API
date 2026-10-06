@@ -303,11 +303,6 @@ func findCookie(rows []cookieRow, name string) string {
 	return ""
 }
 
-// defaultFP 生成一个形如上游 fp 参数的指纹占位值。
-func defaultFP() string {
-	return "verify_" + RandomHex(5) + "_" + RandomHex(5) + "_" + RandomHex(4) + "_" + RandomHex(4) + "_" + RandomHex(4) + "_" + RandomHex(10)
-}
-
 // readDeviceIDs 从 Chromium Local Storage 中尽力读取设备指纹。
 // 读取失败返回空串，调用方回退到随机占位值。
 func readDeviceIDs(userData, profile string) (deviceID, webID string) {

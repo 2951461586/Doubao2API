@@ -23,6 +23,9 @@ import (
 	"doubao2api/internal/store"
 )
 
+// version 由构建时注入：-ldflags "-X main.version=1.0.0"
+var version = "dev"
+
 func main() {
 	var (
 		host       = flag.String("host", envOr("DOUBAO_HOST", "127.0.0.1"), "监听地址")
@@ -31,8 +34,14 @@ func main() {
 		doubaoDir  = flag.String("doubao-dir", envOr("DOUBAO_DATA_DIR", ""), "DoubaoWork 数据目录（留空自动探测）")
 		importOnly = flag.Bool("import", false, "仅执行一次桌面端导入后退出")
 		noImport   = flag.Bool("no-import", false, "启动时不自动导入桌面端登录态")
+		showVer    = flag.Bool("version", false, "打印版本后退出")
 	)
 	flag.Parse()
+
+	if *showVer {
+		fmt.Println("doubao2api", version)
+		return
+	}
 
 	if *dataPath == "" {
 		*dataPath = defaultDataPath()
@@ -64,7 +73,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Doubao2API 已启动: http://%s/", addr)
+		log.Printf("Doubao2API %s 已启动: http://%s/", version, addr)
 		if st.HasKeys() {
 			log.Printf("已签发 API 密钥，调用需携带 Authorization: Bearer sk-...")
 		} else {
