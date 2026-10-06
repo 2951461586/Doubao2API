@@ -1,0 +1,17 @@
+# 仓库内统一使用 LF，避免跨平台换行符抖动
+* text=auto eol=lf
+
+*.go    text eol=lf
+*.md    text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+*.mod   text eol=lf
+
+# 二进制
+*.exe   binary
+*.dll   binary
+*.pak   binary
+*.bin   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary

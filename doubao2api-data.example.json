@@ -1,0 +1,60 @@
+{
+  "accounts": [
+    {
+      "id": "0123456789abcdef",
+      "name": "DoubaoWork/Default",
+      "source": "auto-import",
+      "cookies": {
+        "sessionid": "<占位：32 位十六进制会话 ID>",
+        "sessionid_ss": "<占位>",
+        "sid_guard": "<占位>",
+        "sid_tt": "<占位>",
+        "uid_tt": "<占位>",
+        "uid_tt_ss": "<占位>",
+        "odin_tt": "<占位>",
+        "ttwid": "<占位>",
+        "passport_csrf_token": "<占位：用于 x-tt-passport-csrf-token 头>",
+        "passport_csrf_token_default": "<占位>",
+        "LARK_SUITE_ACCESS_TOKEN": "<占位：JWT>",
+        "LARK_SUITE_DPOP": "<占位：JWT>"
+      },
+      "device_id": "700000000000001",
+      "web_id": "7600000000000000000",
+      "fp": "verify_0000000000_0000000000_0000_0000_0000_0000000000",
+      "ms_token": "",
+      "enabled": true,
+      "status": "ok",
+      "note": "",
+      "last_used": 0,
+      "last_err": "",
+      "failures": 0
+    }
+  ],
+  "keys": [
+    {
+      "key": "sk-<占位：控制台签发的调用密钥>",
+      "name": "default",
+      "enabled": true,
+      "created_at": 0,
+      "last_used": 0,
+      "requests": 0
+    }
+  ],
+  "settings": {
+    "model_aliases": {
+      "gpt-4o": "doubao"
+    },
+    "request_timeout_sec": 300,
+    "max_retries": 3,
+    "log_keep": 500,
+    "cors_origin": "",
+    "admin_password": ""
+  },
+  "stats": {
+    "total_requests": 0,
+    "failed_requests": 0,
+    "total_chars_out": 0,
+    "started_at": 0
+  },
+  "logs": []
+}

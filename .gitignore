@@ -1,0 +1,19 @@
+# 构建产物
+doubao2api
+doubao2api.exe
+*.exe
+
+# 运行期状态：含账号会话 Cookie，等同账号密码，切勿提交
+doubao2api-data.json
+*.tmp
+
+# 逆向复刻中间产物（体积大且可由 .recon/extract_pak.py 重新生成）
+.recon/
+extract/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
