@@ -406,13 +406,14 @@ doubao2api/
 
 ### 已完成（第一阶段：精简网关）
 
-- [x] 桌面端凭据自动导入（DPAPI + AES-GCM + 域名前缀）
+- [x] 桌面端凭据自动导入（DPAPI + AES-GCM + 域名前缀），支持多 profile 批量导入
 - [x] 上游协议复刻（公参、请求体、SSE 补丁流）
 - [x] `/v1/chat/completions`（流式 / 非流式）+ `/v1/models`
 - [x] 三档模式与思维链 → `reasoning_content`
 - [x] 多轮会话（压平历史 + `conversation_id` 原生续接）
 - [x] 账号池轮询与有界重试
-- [x] 控制台 API（账号 / 密钥 / 日志 / 统计 / 设置）
+- [x] 控制台 API（账号 / 密钥 / 日志 / 统计 / 设置），带管理鉴权与 CSRF 防护
+- [x] Docker 一键部署（多阶段构建、非 root、健康检查）
 
 ### 后续阶段
 
