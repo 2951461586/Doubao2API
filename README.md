@@ -221,6 +221,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 | `/v1/chat/completions` | POST | OpenAI Chat Completions，流式 / 非流式 |
 | `/v1/messages` | POST | Anthropic Messages，流式 / 非流式 |
 | `/v1/images/generations` | POST | OpenAI Images，文生图（返回 `url` / `b64_json`） |
+| `/v1/videos/generations` | POST | 文生视频（返回 `url` / `vid` / 时长 / 分辨率） |
 | `/v1/models` | GET | 模型清单（含 `doubao.think_level` 等扩展字段） |
 
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
@@ -480,26 +481,42 @@ POST /top/v1?Action=CommitImageUpload   →  最终 uri
 
 > 实测：不带「生成一张图片:」前缀的裸提示词不会触发图像技能，模型会当普通问题回答。
 
-### 6.6 为何视频 / 音乐不能单次调用
+### 6.6 文生视频：创意画布
 
-两者都**不是单发接口**，且受会员配额限制：
+视频生成**不在聊天技能链路上**。带 `skill=17` 会走「参数确认卡」并受会员配额限制
+（实测 `STREAM_ERROR`：`710022004 rate limited`，`extra.decision` 来自 `shark_admin`），
+但**创意画布执行接口**是单发的、可用的：
 
-- **视频**：带 `skill=17` 发「生成一段视频：…」后，上游先回一张**参数确认卡**
-  （模型 Seedance / 时长 15s / 比例 16:9），需用户确认后才真正开始生成；
-  直接走生成分支时会返回 `STREAM_ERROR`：
-  `{"error_code":710022004,"error_msg":"rate limited","extra":{"decision":"…\"from\":\"shark_admin\"…\"type\":\"verify\""}}`。
-- **音乐**：先产出**歌词**（`# 《标题》曲风：… ## 主歌1 …`），再进入谱曲步骤；
-  相关接口为 `/alice/media/bigmusic/lyrics`（`prompt`/`instruction_options`）
-  与 `/alice/bot/list_music_gen_template`。
-- 文案佐证：`Doubao_paywall_free_video_quota_reached_cn`（免费版视频次数上限）、
-  `doubao_member_music_generation_quota_cn`（音乐生成限额）。
-- 结果块类型：`VideoGeneration=2021`、`CreationMulti=2022`；
-  音乐内容类型 `LyricsToSongMusic=70` / `LyricsToSongLyric=71`。
+```text
+POST /creativity/canvas/exec
+  {exec_req:{request_id, operation:{canvas_type:50(GenVideo), generate_type:1(CREATE),
+                                    prompt, use_model?, video_param:{duration, ratio}}},
+   canvas_id_str:""}
+  → data:{canvas_id, canvas_sub_id, task_status, result:{artifacts:[…]}}
+```
 
-因此网关只把技能选择透传出去（`skill` 字段），**不伪造**多步确认流程。
-带配额账号可以自行走完整交互。
+该接口**按 `request_id` 幂等**：轮询就是原样重发；`task_status` 为
+`1=PENDING / 2=RUNNING / 3=SUCCEEDED / 4=FAILED`，成功后取
+`result.artifacts[0].video`：
 
-### 6.6 扫码登录
+```json
+{"download_url":"https://aka.doubaocdn.com/s/…","vid":"v0369…",
+ "duration":15.05,"width":1280,"height":720}
+```
+
+`use_model` 留空时上游自行选择（实测落到 `seedance_v2.0`）。实测一次生成约 3 分钟，
+因此 `/v1/videos/generations` 单独把超时放宽到 15 分钟。
+
+### 6.7 文生音乐：仍非单发
+
+- **歌词**可单发：`POST /alice/media/bigmusic/lyrics`（`{prompt}`，或
+  `{prompt, genre, mood}` 走 `lyrics_web`）→ `data.lyrics_list`。
+- **音频**没有独立 REST 接口：结果以聊天消息内容类型回传
+  （`LyricsToSongMusic=70` / `LyricsToSongLyric=71` / `LyricsToSongsMusic=72`），
+  需在歌词之后追加一次确认，且属会员配额能力
+  （`doubao_member_music_generation_quota_cn`）。
+
+### 6.8 扫码登录
 
 `accounts.doubao.com` 的 passport SSO：
 
@@ -526,6 +543,7 @@ doubao2api/
 │   │   ├── cookie_other.go        # 非 Windows 平台占位
 │   │   ├── sse.go                 # SSE 事件流解析
 │   │   ├── upload.go              # 图片转存：prepare_upload + imageX 直传（SigV4）
+│   │   ├── video.go               # 文生视频：创意画布 exec + 幂等轮询
 │   │   └── client.go              # 上游客户端：公参、请求体、补丁流解析
 │   ├── store/store.go             # 状态持久化、账号池、密钥、统计、日志
 │   ├── registry/registry.go       # 模型清单与别名解析
@@ -534,6 +552,7 @@ doubao2api/
 │       ├── chat.go                # /v1/chat/completions、多轮、重试、附件转存
 │       ├── anthropic.go           # /v1/messages 双向转换
 │       ├── images.go              # /v1/images/generations（文生图技能）
+│       ├── videos.go              # /v1/videos/generations（创意画布 GenVideo）
 │       ├── login.go               # 扫码登录（passport SSO）
 │       ├── web.go                 # 控制台单页的内嵌与响应头
 │       └── web/index.html         # 控制台单页（单文件，无外部依赖）
@@ -564,13 +583,14 @@ doubao2api/
 - [x] 图片理解：`block_type=10052` 上传链路（`/alice/resource/prepare_upload` + imageX 直传）
 - [x] 文件解析（PDF / Office / 文本，附件 `type=3`）
 - [x] 文生图（`/v1/images/generations`，基于图像生成技能 `skill_type=3`）
+- [x] 文生视频（`/v1/videos/generations`，基于创意画布 `canvas_type=50`，已实测）
 - [x] 扫码登录（passport SSO，`/admin/api/login/qrcode`）
 - [x] 技能透传（聊天接口 `skill` 字段，可显式指定 3/9/17）
 
 ### 后续阶段
 
-- [ ] 文生视频 / 文生音乐：**已查明为多步交互 + 会员配额**，非单发接口（见 6.6），
-      需先实现参数确认卡的多轮协议，且当前账号无配额可验证
+- [ ] 文生音乐：歌词可单发（`/alice/media/bigmusic/lyrics`），
+      音频需聊天确认步 + 会员配额，无独立 REST（见 6.7）
 
 ---
 

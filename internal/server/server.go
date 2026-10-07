@@ -48,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.withAuth(s.handleChatCompletions))
 	mux.HandleFunc("/v1/messages", s.withAuth(s.handleAnthropicMessages))
 	mux.HandleFunc("/v1/images/generations", s.withAuth(s.handleImageGenerations))
+	mux.HandleFunc("/v1/videos/generations", s.withAuth(s.handleVideoGenerations))
 
 	// 控制台 API（统一走管理鉴权 + 同源校验）
 	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))
