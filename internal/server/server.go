@@ -49,6 +49,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/messages", s.withAuth(s.handleAnthropicMessages))
 	mux.HandleFunc("/v1/images/generations", s.withAuth(s.handleImageGenerations))
 	mux.HandleFunc("/v1/videos/generations", s.withAuth(s.handleVideoGenerations))
+	mux.HandleFunc("/v1/music/audio", s.withAuth(s.handleMusicAudio))
 
 	// 控制台 API（统一走管理鉴权 + 同源校验）
 	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))

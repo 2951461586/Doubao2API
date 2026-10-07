@@ -25,6 +25,9 @@ type chatRequest struct {
 	// Skill 是本网关的扩展字段，用于显式指定上游技能
 	// （对应 option.action_bar_skill_id）：名称或数值，如 "image" / "music" / "video"。
 	Skill any `json:"skill"`
+	// InputSkill 对应上游 ext.input_skill（技能入参 JSON 字符串）。
+	// 音乐技能需要：{"lyric":"…","theme":"…","mood":"…","genre":"…","generation_type":"…"}
+	InputSkill string `json:"input_skill"`
 }
 
 type chatMessage struct {
@@ -69,6 +72,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		BotID:          req.BotID,
 		ConversationID: req.ConversationID,
 		SkillID:        resolveSkill(req.Skill),
+		InputSkill:     req.InputSkill,
 		Images:         images,
 		Files:          files,
 	}

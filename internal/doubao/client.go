@@ -222,6 +222,17 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 		convID = "0"
 	}
 
+	ext := map[string]any{
+		"use_deep_think":                think,
+		"fp":                            a.FP,
+		"use_submit_pipeline":           "1",
+		"commerce_credit_config_enable": "0",
+		"sub_conv_firstmet_type":        "1",
+	}
+	if req.InputSkill != "" {
+		ext["input_skill"] = req.InputSkill
+	}
+
 	return map[string]any{
 		"client_meta": map[string]any{
 			"local_conversation_id": localConv,
@@ -271,13 +282,7 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 			"is_ai_playground":       false,
 		},
 		"chat_ability": map[string]any{},
-		"ext": map[string]any{
-			"use_deep_think":                think,
-			"fp":                            a.FP,
-			"use_submit_pipeline":           "1",
-			"commerce_credit_config_enable": "0",
-			"sub_conv_firstmet_type":        "1",
-		},
+		"ext":          ext,
 	}
 }
 

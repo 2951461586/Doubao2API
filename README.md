@@ -222,6 +222,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 | `/v1/messages` | POST | Anthropic Messages，流式 / 非流式 |
 | `/v1/images/generations` | POST | OpenAI Images，文生图（返回 `url` / `b64_json`） |
 | `/v1/videos/generations` | POST | 文生视频（返回 `url` / `vid` / 时长 / 分辨率） |
+| `/v1/music/audio` | POST | 用音乐消息的 `video_id` 换取音频地址 |
 | `/v1/models` | GET | 模型清单（含 `doubao.think_level` 等扩展字段） |
 
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
@@ -229,6 +230,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 
 > **扩展字段**：聊天接口支持 `skill`（技能透传），可取 `image` / `music` / `video`
 > 或直接传数值（3 / 9 / 17），对应上游 `option.action_bar_skill_id`；
+> `input_skill` 对应上游 `ext.input_skill`（音乐技能入参）；
 > `content` 里可放 `input_file` / `image_url` 分片（见下文「多模态」）。
 
 #### 多轮会话
@@ -507,14 +509,21 @@ POST /creativity/canvas/exec
 `use_model` 留空时上游自行选择（实测落到 `seedance_v2.0`）。实测一次生成约 3 分钟，
 因此 `/v1/videos/generations` 单独把超时放宽到 15 分钟。
 
-### 6.7 文生音乐：仍非单发
+### 6.7 文生音乐：输入结构与音频解析已还原
 
-- **歌词**可单发：`POST /alice/media/bigmusic/lyrics`（`{prompt}`，或
+- **输入结构**：音乐技能的入参放在 `ext.input_skill`（JSON 字符串）：
+  `{"lyric":"…","theme":"…","mood":"…","genre":"…","gender":"","generation_type":"…"}`。
+- **成品消息**：音乐以 `content_type=70`（LyricsToSongMusic）回传，其 `content_obj`
+  携带 `video_id`；歌词是 `content_type=71`（另有 `72` = 多首成品）。
+- **音频地址**：客户端用 `video_id` 调 `POST /alice/media/bigmusic/get_video`
+  取真实地址（桌面端渲染器的 `fetchMusicAudioUrl`），**实测该接口可用**，
+  返回带签名的 `video/tos/...` 地址。
+- **歌词可单发**：`POST /alice/media/bigmusic/lyrics`（`{prompt}`，或
   `{prompt, genre, mood}` 走 `lyrics_web`）→ `data.lyrics_list`。
-- **音频**没有独立 REST 接口：结果以聊天消息内容类型回传
-  （`LyricsToSongMusic=70` / `LyricsToSongLyric=71` / `LyricsToSongsMusic=72`），
-  需在歌词之后追加一次确认，且属会员配额能力
-  （`doubao_member_music_generation_quota_cn`）。
+- **未闭环的部分**：`skill=9` 的聊天请求在这三个账号上**固定**返回
+  `710022004 rate limited`（`shark_admin` 配额/风控），因此拿不到真实的
+  `content_type=70` 样本。网关已实现 `input_skill` 透传与
+  `/v1/music/audio`（`video_id` → 音频地址），有配额的账号可自行闭环。
 
 ### 6.8 扫码登录
 
@@ -544,6 +553,7 @@ doubao2api/
 │   │   ├── sse.go                 # SSE 事件流解析
 │   │   ├── upload.go              # 图片转存：prepare_upload + imageX 直传（SigV4）
 │   │   ├── video.go               # 文生视频：创意画布 exec + 幂等轮询
+│   │   ├── music.go               # 音乐：input_skill 结构 + get_video 音频解析
 │   │   └── client.go              # 上游客户端：公参、请求体、补丁流解析
 │   ├── store/store.go             # 状态持久化、账号池、密钥、统计、日志
 │   ├── registry/registry.go       # 模型清单与别名解析
@@ -553,6 +563,7 @@ doubao2api/
 │       ├── anthropic.go           # /v1/messages 双向转换
 │       ├── images.go              # /v1/images/generations（文生图技能）
 │       ├── videos.go              # /v1/videos/generations（创意画布 GenVideo）
+│       ├── music.go               # /v1/music/audio（video_id → 音频地址）
 │       ├── login.go               # 扫码登录（passport SSO）
 │       ├── web.go                 # 控制台单页的内嵌与响应头
 │       └── web/index.html         # 控制台单页（单文件，无外部依赖）
@@ -585,12 +596,14 @@ doubao2api/
 - [x] 文生图（`/v1/images/generations`，基于图像生成技能 `skill_type=3`）
 - [x] 文生视频（`/v1/videos/generations`，基于创意画布 `canvas_type=50`，已实测）
 - [x] 扫码登录（passport SSO，`/admin/api/login/qrcode`）
-- [x] 技能透传（聊天接口 `skill` 字段，可显式指定 3/9/17）
+- [x] 技能透传（聊天接口 `skill` / `input_skill` 字段）
+- [x] 音乐音频解析（`/v1/music/audio`，`video_id` → 音频地址，已实测）
 
 ### 后续阶段
 
-- [ ] 文生音乐：歌词可单发（`/alice/media/bigmusic/lyrics`），
-      音频需聊天确认步 + 会员配额，无独立 REST（见 6.7）
+- [ ] 文生音乐成品：输入结构（`ext.input_skill`）与成品消息（`content_type=70`）
+      均已还原，但上游对音乐技能固定 `710022004 rate limited`，
+      当前账号无配额，拿不到真实成品样本（见 6.7）
 
 ---
 

@@ -105,6 +105,9 @@ type ChatRequest struct {
 	ConversationID string
 	// SkillID 对应上游 option.action_bar_skill_id（技能类型，如 3=图像 9=音乐 17=视频）。
 	SkillID int
+	// InputSkill 对应上游 ext.input_skill（技能入参 JSON 字符串，如音乐技能的
+	// {"lyric":"…","theme":"…","mood":"…","genre":"…","generation_type":"…"}）。
+	InputSkill string
 	// 多模态附件
 	Images []ImageAttachment
 	Files  []FileAttachment

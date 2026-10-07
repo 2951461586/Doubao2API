@@ -22,6 +22,15 @@ import (
 	"doubao2api/internal/store"
 )
 
+func readArg(s string) string {
+	if strings.HasPrefix(s, "@") {
+		if b, err := os.ReadFile(s[1:]); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return s
+}
+
 func mimeByExt(ext string) string {
 	switch strings.ToLower(ext) {
 	case "pdf":
@@ -56,6 +65,8 @@ func main() {
 	think := flag.Int("think", 0, "思考档位（配合 -chat）")
 	skill := flag.Int("skill", 0, "action_bar_skill_id（配合 -chat）：3=图像 9=音乐 17=视频")
 	cs := flag.Bool("cs", false, "改用 ChatStream（与网关同一路径）发送 -chat 并打印增量")
+	conv := flag.String("conv", "", "conversation_id（配合 -chat，用于多轮）")
+	inSkill := flag.String("inputskill", "", "ext.input_skill（技能入参 JSON，配合 -chat）")
 	base := flag.String("base", doubao.UpstreamBase, "上游 host（如 https://accounts.doubao.com）")
 	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
 	flag.Parse()
@@ -121,7 +132,9 @@ func main() {
 	}
 
 	if *chat != "" {
-		payload := doubao.BuildPayload(a, doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill})
+		chatText := readArg(*chat)
+		inSkillVal := readArg(*inSkill)
+		payload := doubao.BuildPayload(a, doubao.ChatRequest{Text: chatText, ThinkLevel: *think, SkillID: *skill, ConversationID: *conv, InputSkill: inSkillVal})
 		body, err := json.Marshal(payload)
 		if err != nil {
 			panic(err)
