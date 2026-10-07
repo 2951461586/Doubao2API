@@ -56,12 +56,12 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	settings := s.Store.Settings()
 	model := registry.Resolve(req.Model, settings.ModelAliases)
 
-	text, images, err := anthropicToChat(&req)
+	text, images, files, err := anthropicToChat(&req)
 	if err != nil {
 		writeAnthropicErr(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
 	}
-	if text == "" && len(images) == 0 {
+	if text == "" && len(images) == 0 && len(files) == 0 {
 		writeAnthropicErr(w, http.StatusBadRequest, "invalid_request_error", "消息内容为空")
 		return
 	}
@@ -70,6 +70,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		Text:       text,
 		ThinkLevel: model.ThinkLevel,
 		Images:     images,
+		Files:      files,
 	}
 	key := extractKey(r)
 	timeout := time.Duration(settings.RequestTimeout) * time.Second
@@ -92,7 +93,7 @@ func (s *Server) blockingAnthropic(w http.ResponseWriter, r *http.Request, upReq
 	)
 
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		req, err := s.withUploadedImages(ctx, acct, upReq)
+		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
@@ -192,7 +193,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 	var streamErr error
 
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		req, err := s.withUploadedImages(ctx, acct, upReq)
+		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
@@ -247,7 +248,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 //
 // 复用 OpenAI 侧的压平逻辑：先把 Anthropic 内容块映射成 OpenAI 形态，
 // 再交给 flattenMessages，避免两套历史压缩实现漂移。
-func anthropicToChat(req *anthropicRequest) (string, []doubao.ImageAttachment, error) {
+func anthropicToChat(req *anthropicRequest) (string, []doubao.ImageAttachment, []doubao.FileAttachment, error) {
 	msgs := make([]chatMessage, 0, len(req.Messages)+1)
 	if sys := anthropicSystemText(req.System); sys != "" {
 		msgs = append(msgs, chatMessage{Role: "system", Content: sys})
@@ -255,15 +256,15 @@ func anthropicToChat(req *anthropicRequest) (string, []doubao.ImageAttachment, e
 	for _, m := range req.Messages {
 		content, err := anthropicContent(m.Content)
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 		msgs = append(msgs, chatMessage{Role: m.Role, Content: content})
 	}
-	text, images, err := flattenMessages(msgs)
+	text, images, files, err := flattenMessages(msgs)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return text, images, nil
+	return text, images, files, nil
 }
 
 // anthropicSystemText 提取 system 字段（字符串或文本块数组）。
@@ -320,6 +321,16 @@ func anthropicContent(raw json.RawMessage) (any, error) {
 					"type": "image_url", "image_url": map[string]any{"url": u},
 				})
 			}
+		case "document":
+			if u := anthropicDocumentDataURL(b); u != "" {
+				name := firstString(b["title"], b["name"])
+				if name == "" {
+					name = "document.pdf"
+				}
+				parts = append(parts, map[string]any{
+					"type": "input_file", "filename": name, "file_data": u,
+				})
+			}
 		case "tool_result":
 			// 工具结果按文本回流，保留上下文
 			if t := anthropicToolResultText(b); t != "" {
@@ -354,6 +365,23 @@ func anthropicImageURL(block map[string]any) string {
 		return u
 	}
 	return ""
+}
+
+// anthropicDocumentDataURL 把 Anthropic 文档块（base64 源）转成 data: URL。
+func anthropicDocumentDataURL(block map[string]any) string {
+	src, ok := block["source"].(map[string]any)
+	if !ok || src["type"] != "base64" {
+		return ""
+	}
+	data, _ := src["data"].(string)
+	if data == "" {
+		return ""
+	}
+	media, _ := src["media_type"].(string)
+	if media == "" {
+		media = "application/pdf"
+	}
+	return "data:" + media + ";base64," + data
 }
 
 // anthropicToolResultText 提取工具结果中的文本。

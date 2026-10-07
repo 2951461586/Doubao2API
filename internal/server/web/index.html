@@ -100,6 +100,7 @@
       <div class="row" style="margin-bottom:12px">
         <button class="btn primary" id="importLocal">导入本机桌面端</button>
         <button class="btn" id="checkinAll">全部探活</button>
+        <button class="btn" id="qrLogin">扫码登录</button>
         <span class="sp" style="flex:1"></span>
         <input id="manualName" placeholder="账号名称（可选）" style="width:170px">
         <input id="manualCookies" placeholder="粘贴 Cookie 串：sessionid=…; sid_guard=…" style="width:330px">
@@ -107,6 +108,17 @@
       </div>
       <table><thead><tr><th>名称</th><th>来源</th><th>会话</th><th>状态</th><th>Cookie</th><th>失败</th><th>最近使用</th><th>操作</th></tr></thead>
       <tbody id="accounts"></tbody></table>
+      <div class="card" id="qrPanel" style="display:none;margin-top:14px">
+        <h2>扫码登录</h2>
+        <div class="row">
+          <img id="qrImg" alt="二维码" style="width:200px;height:200px;background:#fff;border-radius:8px;padding:6px">
+          <div>
+            <div id="qrStatus" class="muted">等待扫码…</div>
+            <div class="hint">使用「抖音 APP」扫码，并在手机上确认登录。</div>
+            <button class="btn danger" id="qrCancel" style="margin-top:10px">取消</button>
+          </div>
+        </div>
+      </div>
       <div class="hint">凭据已脱敏展示。导入 / 手工录入的完整 Cookie 仅存于本机状态文件。</div>
     </div>
   </section>
@@ -483,6 +495,38 @@
     }).catch(function(e){ toast("保存失败：" + e.message, "err"); });
   };
   $("#logLimit").onchange = refreshLogs;
+
+  var qrTimer = null, qrSid = null;
+  function stopQR(){
+    if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
+    qrSid = null;
+  }
+  function pollQR(){
+    if (!qrSid) return;
+    api("/admin/api/login/qrcode/poll", {method:"POST", body:{session_id:qrSid}}).then(function(r){
+      var map = {waiting:"等待扫码…", scanned:"已扫码，请在手机上确认", confirmed:"登录成功", expired:"二维码已过期"};
+      $("#qrStatus").textContent = map[r.status] || r.status;
+      if (r.status === "confirmed") {
+        stopQR();
+        $("#qrPanel").style.display = "none";
+        toast("扫码登录成功：" + (r.name || ""), "ok");
+        refresh();
+      } else if (r.status === "expired") {
+        stopQR();
+      }
+    }).catch(function(e){ stopQR(); toast("轮询失败：" + e.message, "err"); });
+  }
+  $("#qrLogin").onclick = function(){
+    api("/admin/api/login/qrcode", {method:"POST"}).then(function(r){
+      $("#qrImg").src = r.qrcode;
+      $("#qrStatus").textContent = "等待扫码…";
+      $("#qrPanel").style.display = "block";
+      stopQR();
+      qrSid = r.session_id;
+      qrTimer = setInterval(pollQR, 2000);
+    }).catch(function(e){ toast("获取二维码失败：" + e.message, "err"); });
+  };
+  $("#qrCancel").onclick = function(){ stopQR(); $("#qrPanel").style.display = "none"; };
 
   try { var saved = localStorage.getItem("doubao2api_pw"); if (saved) $("#pw").value = saved; } catch(e){}
   $("#pw").addEventListener("keydown", function(e){ if (e.key === "Enter") { $("#savePw").click(); } });

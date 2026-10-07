@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,12 +50,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	settings := s.Store.Settings()
 	model := registry.Resolve(req.Model, settings.ModelAliases)
 
-	text, images, err := flattenMessages(req.Messages)
+	text, images, files, err := flattenMessages(req.Messages)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if text == "" && len(images) == 0 {
+	if text == "" && len(images) == 0 && len(files) == 0 {
 		writeErr(w, http.StatusBadRequest, "消息内容为空", "invalid_request_error")
 		return
 	}
@@ -65,6 +66,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		BotID:          req.BotID,
 		ConversationID: req.ConversationID,
 		Images:         images,
+		Files:          files,
 	}
 
 	key := extractKey(r)
@@ -83,13 +85,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // blockingChat 收集完整回复后一次性返回。
 func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doubao.ChatRequest, model registry.Model, key string, timeout time.Duration, start time.Time) {
 	var (
-		out      strings.Builder
-		thinking strings.Builder
-		convID   string
+		out          strings.Builder
+		thinking     strings.Builder
+		convID       string
+		imageURLs    []string
+		seenCreation = map[string]bool{}
 	)
 
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		req, err := s.withUploadedImages(ctx, acct, upReq)
+		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
@@ -100,6 +104,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 			if c.ErrorCode != 0 {
 				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
 			}
+			imageURLs = append(imageURLs, newCreationURLs(c.Creations, seenCreation)...)
 			out.WriteString(c.Text)
 			thinking.WriteString(c.Thinking)
 			return nil
@@ -127,6 +132,9 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		}},
 		"usage":           estimateUsage(upReq.Text, out.String()),
 		"conversation_id": convID,
+	}
+	if len(imageURLs) > 0 {
+		resp["images"] = imageURLs
 	}
 	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
 	writeJSON(w, http.StatusOK, resp)
@@ -174,14 +182,18 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	send(map[string]any{"role": "assistant", "content": ""}, nil)
 
 	var streamErr error
+	seenCreation := map[string]bool{}
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		req, err := s.withUploadedImages(ctx, acct, upReq)
+		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
 		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
 			if c.ErrorCode != 0 {
 				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+			}
+			if urls := newCreationURLs(c.Creations, seenCreation); len(urls) > 0 {
+				send(map[string]any{"images": urls}, nil)
 			}
 			if c.ConvID != "" {
 				// 通过额外的 SSE 注释块回传会话 ID，便于客户端续接多轮
@@ -255,42 +267,58 @@ func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn
 	return used, lastErr
 }
 
-// withUploadedImages 确保每张图片都有可用于 content_block 的上游 uri。
+// withUploadedAttachments 确保每个图片 / 文件附件都有可用于 content_block 的上游 uri。
 //
-// 仅有外链（CDNURL）的图片由网关代下载；仅有原始字节（Data）的图片直接上传。
-// 两者都会转存到豆包资源中心——上游不会自行抓取外部图片（已实测）。
-func (s *Server) withUploadedImages(ctx context.Context, acct *doubao.Account, req doubao.ChatRequest) (doubao.ChatRequest, error) {
-	if len(req.Images) == 0 {
-		return req, nil
-	}
-	imgs := make([]doubao.ImageAttachment, len(req.Images))
-	copy(imgs, req.Images)
-	for i := range imgs {
-		if imgs[i].URI != "" {
-			continue
-		}
-		if len(imgs[i].Data) == 0 && imgs[i].CDNURL != "" {
-			data, mime, err := doubao.FetchImage(ctx, imgs[i].CDNURL)
+// 仅有外链（CDNURL）的图片由网关代下载；仅有原始字节（Data）的附件直接上传。
+// 两者都会转存到豆包资源中心——上游不会自行抓取外部资源（已实测）。
+func (s *Server) withUploadedAttachments(ctx context.Context, acct *doubao.Account, req doubao.ChatRequest) (doubao.ChatRequest, error) {
+	if len(req.Images) > 0 {
+		imgs := make([]doubao.ImageAttachment, len(req.Images))
+		copy(imgs, req.Images)
+		for i := range imgs {
+			if imgs[i].URI != "" {
+				continue
+			}
+			if len(imgs[i].Data) == 0 && imgs[i].CDNURL != "" {
+				data, mime, err := doubao.FetchImage(ctx, imgs[i].CDNURL)
+				if err != nil {
+					return req, fmt.Errorf("获取图片失败: %w", err)
+				}
+				imgs[i].Data = data
+				if imgs[i].Format == "" {
+					imgs[i].Format = strings.TrimPrefix(mime, "image/")
+				}
+			}
+			if len(imgs[i].Data) == 0 {
+				continue
+			}
+			uri, err := s.Up.UploadImage(ctx, acct, imgs[i])
 			if err != nil {
-				return req, fmt.Errorf("获取图片失败: %w", err)
+				return req, fmt.Errorf("图片上传失败: %w", err)
 			}
-			imgs[i].Data = data
-			if imgs[i].Format == "" {
-				imgs[i].Format = strings.TrimPrefix(mime, "image/")
-			}
+			imgs[i].URI = uri
+			imgs[i].Data = nil
+			imgs[i].CDNURL = ""
 		}
-		if len(imgs[i].Data) == 0 {
-			continue
-		}
-		uri, err := s.Up.UploadImage(ctx, acct, imgs[i])
-		if err != nil {
-			return req, fmt.Errorf("图片上传失败: %w", err)
-		}
-		imgs[i].URI = uri
-		imgs[i].Data = nil
-		imgs[i].CDNURL = ""
+		req.Images = imgs
 	}
-	req.Images = imgs
+
+	if len(req.Files) > 0 {
+		files := make([]doubao.FileAttachment, len(req.Files))
+		copy(files, req.Files)
+		for i := range files {
+			if files[i].URI != "" || len(files[i].Data) == 0 {
+				continue
+			}
+			uri, err := s.Up.UploadFile(ctx, acct, files[i])
+			if err != nil {
+				return req, fmt.Errorf("文件上传失败: %w", err)
+			}
+			files[i].URI = uri
+			files[i].Data = nil
+		}
+		req.Files = files
+	}
 	return req, nil
 }
 
@@ -318,18 +346,20 @@ func (s *Server) probeAccount(ctx context.Context, a *doubao.Account) error {
 	})
 }
 
-// flattenMessages 把 OpenAI 消息列表压平为一段提示文本，并抽出图片附件。
+// flattenMessages 把 OpenAI 消息列表压平为一段提示文本，并抽出图片 / 文件附件。
 //
 // 豆包原生按 conversation_id 维护上下文，但 OpenAI 客户端每次都带全量历史，
 // 因此这里把历史合并进单轮提示，语义等价且不依赖服务端会话。
-func flattenMessages(msgs []chatMessage) (string, []doubao.ImageAttachment, error) {
+func flattenMessages(msgs []chatMessage) (string, []doubao.ImageAttachment, []doubao.FileAttachment, error) {
 	var sys []string
 	var turns []string
 	var images []doubao.ImageAttachment
+	var files []doubao.FileAttachment
 
 	for _, m := range msgs {
-		text, imgs := extractContent(m.Content)
+		text, imgs, fls := extractContent(m.Content)
 		images = append(images, imgs...)
+		files = append(files, fls...)
 		text = strings.TrimSpace(text)
 		switch strings.ToLower(m.Role) {
 		case "system", "developer":
@@ -362,17 +392,20 @@ func flattenMessages(msgs []chatMessage) (string, []doubao.ImageAttachment, erro
 	} else {
 		sb.WriteString(strings.Join(turns, "\n"))
 	}
-	return sb.String(), images, nil
+	return sb.String(), images, files, nil
 }
 
 // extractContent 解析 OpenAI 的 content 字段（字符串或分片数组）。
-func extractContent(v any) (string, []doubao.ImageAttachment) {
+//
+// 支持 text / image_url / input_image / file / input_file。
+func extractContent(v any) (string, []doubao.ImageAttachment, []doubao.FileAttachment) {
 	switch c := v.(type) {
 	case string:
-		return c, nil
+		return c, nil, nil
 	case []any:
 		var sb strings.Builder
 		var imgs []doubao.ImageAttachment
+		var files []doubao.FileAttachment
 		for _, part := range c {
 			pm, ok := part.(map[string]any)
 			if !ok {
@@ -397,11 +430,71 @@ func extractContent(v any) (string, []doubao.ImageAttachment) {
 				if url != "" {
 					imgs = append(imgs, imageAttachmentFromURL(url))
 				}
+			case "file", "input_file":
+				if f, ok := fileAttachmentFromPart(pm); ok {
+					files = append(files, f)
+				}
 			}
 		}
-		return sb.String(), imgs
+		return sb.String(), imgs, files
 	}
-	return "", nil
+	return "", nil, nil
+}
+
+// fileAttachmentFromPart 解析 OpenAI 风格的文件分片，兼容两种写法：
+//
+//	{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,..."}}
+//	{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,..."}
+//
+// file_data 也接受不带 data: 前缀的裸 base64。
+func fileAttachmentFromPart(pm map[string]any) (doubao.FileAttachment, bool) {
+	obj := pm
+	if f, ok := pm["file"].(map[string]any); ok {
+		obj = f
+	}
+	name := firstString(obj["filename"], obj["name"], pm["filename"], pm["name"])
+	raw := firstString(obj["file_data"], obj["data"], pm["file_data"], pm["data"])
+	if raw == "" {
+		return doubao.FileAttachment{}, false
+	}
+	_, data, ok := doubao.ParseDataURL(raw)
+	if !ok {
+		if d, err := base64.StdEncoding.DecodeString(raw); err == nil {
+			data, ok = d, true
+		}
+	}
+	if !ok || len(data) == 0 {
+		return doubao.FileAttachment{}, false
+	}
+	if name == "" {
+		name = "file.bin"
+	}
+	return doubao.FileAttachment{Name: name, Size: int64(len(data)), Data: data}, true
+}
+
+// firstString 返回第一个非空字符串。
+func firstString(vals ...any) string {
+	for _, v := range vals {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// newCreationURLs 提取尚未出现过的生成产物 URL。
+//
+// 上游会分多个 patch 重复推送同一个 creation，因此按 ID 去重。
+func newCreationURLs(creations []doubao.Creation, seen map[string]bool) []string {
+	var urls []string
+	for _, cr := range creations {
+		if cr.URL == "" || seen[cr.ID] {
+			continue
+		}
+		seen[cr.ID] = true
+		urls = append(urls, cr.URL)
+	}
+	return urls
 }
 
 // estimateUsage 给出粗略的用量估算（豆包不返回 token 数）。

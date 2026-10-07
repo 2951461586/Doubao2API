@@ -12,6 +12,14 @@ const (
 	BlockSearchResult = 10025 // 联网搜索结果块
 	BlockLoading      = 10101 // 加载中提示块
 	BlockAttachment   = 10052 // 附件块（图片 / 文件）
+	BlockCreation     = 2074  // 生成结果块（文生图等 creation_block）
+)
+
+// 技能类型（option.action_bar_skill_id），取值见 /samantha/skill/list 的 skill_type。
+const (
+	SkillImageGen = 3  // 图像生成（default_prompt: 生成一张图片:${style} ${content}）
+	SkillMusicGen = 9  // 音乐生成
+	SkillVideoGen = 17 // 视频生成
 )
 
 // 深度思考档位（option.need_deep_think / ext.use_deep_think）
@@ -75,6 +83,18 @@ type CompletionChunk struct {
 	ErrorCode int
 	ErrorMsg  string
 	Done      bool
+	Creations []Creation // 生成产物（文生图等）
+}
+
+// Creation 是一次生成产物（来自 block_type=2074 的 creation_block）。
+type Creation struct {
+	ID       string
+	Type     int    // creation.type
+	TaskType int    // gen_detail.task_type（1=文生图）
+	URI      string // 资源 key（tos-cn-...）
+	URL      string // 可访问的签名 URL
+	Width    int
+	Height   int
 }
 
 // ChatRequest 是网关内部统一的对话请求。
@@ -83,6 +103,8 @@ type ChatRequest struct {
 	ThinkLevel     int
 	BotID          string
 	ConversationID string
+	// SkillID 对应上游 option.action_bar_skill_id（技能类型，如 3=图像 9=音乐 17=视频）。
+	SkillID int
 	// 多模态附件
 	Images []ImageAttachment
 	Files  []FileAttachment
@@ -103,10 +125,14 @@ type ImageAttachment struct {
 	Data []byte
 }
 
-// FileAttachment 文件附件（已上传到上游存储）。
+// FileAttachment 文件附件。
+//
+// 与图片同理：URI 非空时直接使用，否则若 Data 非空则先上传取得 URI。
 type FileAttachment struct {
 	URI      string
 	Name     string
 	Size     int64
 	FileType string
+	// Data 是待上传的原始文件字节（仅当 URI 为空时使用）。
+	Data []byte
 }

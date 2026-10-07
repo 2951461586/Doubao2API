@@ -266,7 +266,7 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 			"no_replace_for_regen":   false,
 			"message_from":           0,
 			"shared_app_name":        "",
-			"action_bar_skill_id":    0,
+			"action_bar_skill_id":    req.SkillID,
 			"sse_recv_event_options": map[string]any{"support_chunk_delta": true},
 			"is_ai_playground":       false,
 		},
@@ -427,6 +427,12 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 						}
 					}
 				}
+			case BlockCreation:
+				for _, cr := range parseCreations(content) {
+					if err := onChunk(CompletionChunk{Creations: []Creation{cr}}); err != nil {
+						return err
+					}
+				}
 			}
 		}
 
@@ -453,6 +459,46 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 		}
 		return nil
 	})
+}
+
+// parseCreations 解析 block_type=2074 的 creation_block。
+//
+// 上游会分多个 patch 推送同一个 creation：首个 patch 只有 placeholder（无 URL），
+// 后续 patch 才带 image.image_ori.url，因此这里只返回已有 URL 的产物。
+func parseCreations(content map[string]any) []Creation {
+	cb, _ := content["creation_block"].(map[string]any)
+	if cb == nil {
+		return nil
+	}
+	var out []Creation
+	for _, it := range asSlice(cb["creations"]) {
+		cm, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		img, _ := cm["image"].(map[string]any)
+		if img == nil {
+			continue
+		}
+		cr := Creation{ID: str(cm["id"]), Type: intOf(cm["type"]), URI: str(img["key"])}
+		if gd, ok := cm["gen_detail"].(map[string]any); ok {
+			cr.TaskType = intOf(gd["task_type"])
+		}
+		if ori, ok := img["image_ori"].(map[string]any); ok {
+			cr.URL = str(ori["url"])
+			cr.Width = intOf(ori["width"])
+			cr.Height = intOf(ori["height"])
+		}
+		if cr.URL == "" {
+			if th, ok := img["image_thumb"].(map[string]any); ok {
+				cr.URL = str(th["url"])
+			}
+		}
+		if cr.URL != "" {
+			out = append(out, cr)
+		}
+	}
+	return out
 }
 
 // iterBlocks 从事件对象中取出全部 content_block。

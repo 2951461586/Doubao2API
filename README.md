@@ -220,6 +220,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 | --- | --- | --- |
 | `/v1/chat/completions` | POST | OpenAI Chat Completions，流式 / 非流式 |
 | `/v1/messages` | POST | Anthropic Messages，流式 / 非流式 |
+| `/v1/images/generations` | POST | OpenAI Images，文生图（返回 `url` / `b64_json`） |
 | `/v1/models` | GET | 模型清单（含 `doubao.think_level` 等扩展字段） |
 
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
@@ -245,9 +246,9 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 
 流式响应中，`conversation_id` 通过 SSE 注释块回传：`: conversation_id=3844...`。
 
-#### 图片理解（多模态）
+#### 多模态（图片 / 文件）
 
-`content` 分片里放 `image_url` 即可，两种写法都支持：
+图片：`content` 分片里放 `image_url`，两种写法都支持：
 
 ```jsonc
 {"role":"user","content":[
@@ -259,8 +260,18 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 ]}
 ```
 
-**上游不会自行抓取外链**（实测会回「请上传图片」），因此网关先把图片转存到豆包资源中心，
-再把得到的 `uri` 填进 `block_type=10052` 附件块。外链大小上限 10 MB。
+文件（PDF / Office / 文本）：用 `input_file`（或 `file`）分片，同样支持 data URL 与裸 base64：
+
+```jsonc
+{"role":"user","content":[
+  {"type":"text","text":"这个文件里的验证码是什么？"},
+  {"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBER..."}
+]}
+```
+
+**上游不会自行抓取外链**（实测会回「请上传图片」），因此网关先把附件转存到豆包资源中心，
+再把得到的 `uri` 填进 `block_type=10052` 附件块（图片 `type=1`、文件 `type=3`）。
+外链大小上限 10 MB。Anthropic 侧对应的 `image` / `document` 块走同一条链路。
 
 #### Anthropic `/v1/messages`
 
@@ -307,6 +318,21 @@ curl http://127.0.0.1:10086/v1/messages \
 | `/admin/api/stats` | GET / DELETE | 统计 |
 | `/admin/api/settings` | GET / POST | 设置 |
 | `/admin/api/checkin` | POST | 对账号做连通性探测 |
+| `/admin/api/login/qrcode` | POST | 发起扫码登录，返回 `qrcode`（data URL）与 `session_id` |
+| `/admin/api/login/qrcode/poll` | POST | 轮询扫码状态：`waiting` / `scanned` / `confirmed` / `expired` |
+
+扫码登录（摆脱对本机桌面端的依赖）：
+
+```bash
+SID=$(curl -s -X POST http://127.0.0.1:10086/admin/api/login/qrcode | jq -r .session_id)
+# 用「抖音 APP」扫描返回的 qrcode 图片并在手机上确认，然后轮询：
+curl -s -X POST http://127.0.0.1:10086/admin/api/login/qrcode/poll \
+  -H 'Content-Type: application/json' -d "{\"session_id\":\"$SID\"}"
+# → {"status":"confirmed","id":"...","name":"扫码登录 01-02 15:04","new":true}
+```
+
+> 豆包账号体系走**抖音 SSO**，扫码需在抖音 APP 内完成；确认后网关自动换取 Cookie 并入库。
+> 控制台「账号」页也内置了扫码按钮。
 
 #### 管理接口鉴权
 
@@ -432,6 +458,27 @@ POST /top/v1?Action=CommitImageUpload   →  最终 uri
 `Content-CRC32` 是 **8 位十六进制**（不是十进制）、签名域为
 `service=imagex` / `region=cn-north-1` / `path=/top/v1`。
 
+### 6.5 文生图
+
+豆包的文生图**没有独立 REST 接口**（`/samantha/cozeplugin/txt2img` 实测返回 `no permission`），
+真正的链路是「图像生成」技能（`/samantha/skill/list` 中 `skill_type=3`，其
+`default_prompt` 为 `生成一张图片:${style} ${content}`）：把 prompt 套进该模板发一条对话，
+上游即以 `block_type=2074` 的 `creation_block.creations[]` 回传图片（实测 2048×2048，
+模型 Seedream）。`/v1/images/generations` 与聊天接口的 `images[]` 都基于此。
+
+> 实测：不带「生成一张图片:」前缀的裸提示词不会触发图像技能，模型会当普通问题回答。
+
+### 6.6 扫码登录
+
+`accounts.doubao.com` 的 passport SSO：
+
+```text
+GET  /passport/web/get_qrcode/?aid=582478&next=<url>   → 二维码(data URL) + token
+POST /passport/web/check_qrconnect/?aid=582478&next=…   → status: new / scan / confirm
+```
+
+会话（含 Cookie jar）保存在内存，确认后跟随跳转拿 `sessionid` 等 Cookie 并入库。
+
 ---
 
 ## 七、项目结构
@@ -453,8 +500,10 @@ doubao2api/
 │   ├── registry/registry.go       # 模型清单与别名解析
 │   └── server/
 │       ├── server.go              # 路由、鉴权、CORS、控制台 API
-│       ├── chat.go                # /v1/chat/completions、多轮、重试、图片转存
+│       ├── chat.go                # /v1/chat/completions、多轮、重试、附件转存
 │       ├── anthropic.go           # /v1/messages 双向转换
+│       ├── images.go              # /v1/images/generations（文生图技能）
+│       ├── login.go               # 扫码登录（passport SSO）
 │       ├── web.go                 # 控制台单页的内嵌与响应头
 │       └── web/index.html         # 控制台单页（单文件，无外部依赖）
 ├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
@@ -482,12 +531,13 @@ doubao2api/
 - [x] 控制台单页（内嵌 HTML 面板，无外部依赖）
 - [x] Anthropic `/v1/messages` 双向转换（含 `thinking` 块与图片）
 - [x] 图片理解：`block_type=10052` 上传链路（`/alice/resource/prepare_upload` + imageX 直传）
+- [x] 文件解析（PDF / Office / 文本，附件 `type=3`）
+- [x] 文生图（`/v1/images/generations`，基于图像生成技能 `skill_type=3`）
+- [x] 扫码登录（passport SSO，`/admin/api/login/qrcode`）
 
 ### 后续阶段
 
-- [ ] 文件解析（PDF / Office 附件链路，`block_type=10052` type=3）
-- [ ] 文生图 / 文生视频 / 文生音乐（异步任务轮询）
-- [ ] 扫码 / 验证码登录（摆脱对本机桌面端的依赖）
+- [ ] 文生视频 / 文生音乐（技能 `skill_type=17` / `9` 存在，但未找到可用的创建链路）
 
 ---
 

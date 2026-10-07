@@ -22,11 +22,13 @@ import (
 type Server struct {
 	Store *store.Store
 	Up    *doubao.Client
+	// Login 保存进行中的扫码登录会话（内存态）。
+	Login *loginSessions
 }
 
 // New 构造服务。
 func New(st *store.Store) *Server {
-	return &Server{Store: st, Up: doubao.NewClient()}
+	return &Server{Store: st, Up: doubao.NewClient(), Login: newLoginSessions()}
 }
 
 // Handler 返回完整路由。
@@ -45,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.withAuth(s.handleModels))
 	mux.HandleFunc("/v1/chat/completions", s.withAuth(s.handleChatCompletions))
 	mux.HandleFunc("/v1/messages", s.withAuth(s.handleAnthropicMessages))
+	mux.HandleFunc("/v1/images/generations", s.withAuth(s.handleImageGenerations))
 
 	// 控制台 API（统一走管理鉴权 + 同源校验）
 	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))
@@ -54,17 +57,19 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/stats", s.withAdminAuth(s.handleAdminStats))
 	mux.HandleFunc("/admin/api/settings", s.withAdminAuth(s.handleAdminSettings))
 	mux.HandleFunc("/admin/api/checkin", s.withAdminAuth(s.handleAdminCheckin))
+	mux.HandleFunc("/admin/api/login/qrcode", s.withAdminAuth(s.handleLoginQRCode))
+	mux.HandleFunc("/admin/api/login/qrcode/poll", s.withAdminAuth(s.handleLoginQRCodePoll))
 
 	mux.HandleFunc("/", s.handleRoot)
 
-	return s.cors(mux)
+	return s.withCORS(mux)
 }
 
-// cors 处理跨域。
+// withCORS 处理跨域。
 //
 // 默认只放行本机来源（localhost / 127.0.0.1 / [::1]，任意端口）；
 // 需局域网访问时在设置里显式列出逗号分隔的来源。不提供通配符。
-func (s *Server) cors(next http.Handler) http.Handler {
+func (s *Server) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		allowed := s.corsOrigin(r.Header.Get("Origin"))
 		writeCORSHeaders(w, allowed)

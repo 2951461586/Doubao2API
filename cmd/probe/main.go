@@ -22,13 +22,42 @@ import (
 	"doubao2api/internal/store"
 )
 
+func mimeByExt(ext string) string {
+	switch strings.ToLower(ext) {
+	case "pdf":
+		return "application/pdf"
+	case "txt", "md":
+		return "text/plain"
+	case "docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "doc":
+		return "application/msword"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case "csv":
+		return "text/csv"
+	case "json":
+		return "application/json"
+	}
+	return "application/octet-stream"
+}
+
 func main() {
 	data := flag.String("data", "doubao2api-data.json", "状态文件")
 	path := flag.String("path", "", "上游路径")
 	body := flag.String("body", "", "JSON 请求体，或 @文件")
 	method := flag.String("method", "POST", "HTTP 方法")
 	acctIdx := flag.Int("acct", 0, "账号索引")
-	upload := flag.String("upload", "", "上传本地图片并打印 uri（逆向验证用）")
+	upload := flag.String("upload", "", "上传本地文件并打印 uri（逆向验证用）")
+	resType := flag.Int("resource-type", doubao.ResourceTypeImage, "上传资源类型：1=File 2=Image")
+	chat := flag.String("chat", "", "发送一条对话并打印原始 SSE（逆向验证用）")
+	think := flag.Int("think", 0, "思考档位（配合 -chat）")
+	skill := flag.Int("skill", 0, "action_bar_skill_id（配合 -chat）：3=图像 9=音乐 17=视频")
+	cs := flag.Bool("cs", false, "改用 ChatStream（与网关同一路径）发送 -chat 并打印增量")
+	base := flag.String("base", doubao.UpstreamBase, "上游 host（如 https://accounts.doubao.com）")
+	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
 	flag.Parse()
 
 	st, err := store.Open(*data)
@@ -54,7 +83,7 @@ func main() {
 		c := doubao.NewClient()
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
-		uri, err := c.UploadImage(ctx, a, doubao.ImageAttachment{Name: name, Format: format, Data: data})
+		uri, err := c.UploadResource(ctx, a, *resType, name, mimeByExt(format), data)
 		if err != nil {
 			fmt.Println("上传失败:", err)
 			os.Exit(1)
@@ -64,6 +93,63 @@ func main() {
 	}
 
 	var rd io.Reader
+	if *cs {
+		c := doubao.NewClient()
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+		n, ncr := 0, 0
+		err := c.ChatStream(ctx, a, doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill}, func(ch doubao.CompletionChunk) error {
+			n++
+			if ch.ErrorCode != 0 {
+				fmt.Println("ERRCODE:", ch.ErrorCode, ch.ErrorMsg)
+			}
+			for _, cr := range ch.Creations {
+				ncr++
+				u := cr.URL
+				if len(u) > 90 {
+					u = u[:90]
+				}
+				fmt.Printf("CREATION id=%s type=%d task=%d url=%s\n", cr.ID, cr.Type, cr.TaskType, u)
+			}
+			return nil
+		})
+		fmt.Println("chunks:", n, "creations:", ncr, "err:", err)
+		return
+	}
+
+	if *chat != "" {
+		payload := doubao.BuildPayload(a, doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill})
+		body, err := json.Marshal(payload)
+		if err != nil {
+			panic(err)
+		}
+		u := doubao.UpstreamBase + "/chat/completion?" + doubao.SecurityParams(a).Encode()
+		hreq, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(body))
+		if err != nil {
+			panic(err)
+		}
+		hreq.Header.Set("Content-Type", "application/json")
+		hreq.Header.Set("Accept", "text/event-stream")
+		hreq.Header.Set("User-Agent", doubao.UserAgent)
+		hreq.Header.Set("Origin", doubao.UpstreamBase)
+		hreq.Header.Set("Referer", doubao.UpstreamBase+"/chat/")
+		if t := a.CSRFToken(); t != "" {
+			hreq.Header.Set("x-tt-passport-csrf-token", t)
+		}
+		hreq.Header.Set("Cookie", doubao.CookieHeader(a.Cookies))
+		c := &http.Client{Timeout: 180 * time.Second}
+		resp, err := c.Do(hreq)
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		fmt.Printf("HTTP %d  %s\n", resp.StatusCode, resp.Header.Get("Content-Type"))
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512<<10))
+		os.Stdout.Write(raw)
+		fmt.Println()
+		return
+	}
+
 	if *body != "" {
 		b := []byte(*body)
 		if b[0] == '@' {
@@ -75,7 +161,10 @@ func main() {
 		rd = bytes.NewReader(b)
 	}
 
-	u := doubao.UpstreamBase + *path + "?" + doubao.SecurityParams(a).Encode()
+	u := *base + *path
+	if !*nosec {
+		u += "?" + doubao.SecurityParams(a).Encode()
+	}
 	req, err := http.NewRequest(*method, u, rd)
 	if err != nil {
 		panic(err)

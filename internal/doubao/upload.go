@@ -312,6 +312,42 @@ func (c *Client) callTop(ctx context.Context, method string, params map[string]s
 	return raw, nil
 }
 
+// UploadFile 上传一个文件（PDF / Office / 文本等），返回可用于 content_block 的 uri。
+func (c *Client) UploadFile(ctx context.Context, a *Account, f FileAttachment) (string, error) {
+	name := f.Name
+	if name == "" {
+		name = "file.bin"
+	}
+	return c.UploadResource(ctx, a, ResourceTypeFile, name, MIMEByFileName(name), f.Data)
+}
+
+// MIMEByFileName 由文件名推断 MIME（上传文件时使用）。
+func MIMEByFileName(name string) string {
+	switch strings.ToLower(fileSuffix(name)) {
+	case "pdf":
+		return "application/pdf"
+	case "txt", "md", "log":
+		return "text/plain"
+	case "csv":
+		return "text/csv"
+	case "json":
+		return "application/json"
+	case "doc":
+		return "application/msword"
+	case "docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case "xls":
+		return "application/vnd.ms-excel"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "ppt":
+		return "application/vnd.ms-powerpoint"
+	case "pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	}
+	return "application/octet-stream"
+}
+
 // UploadImage 上传一张图片，返回可用于 content_block 的 uri。
 func (c *Client) UploadImage(ctx context.Context, a *Account, img ImageAttachment) (string, error) {
 	name := img.Name
