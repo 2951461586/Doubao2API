@@ -7,9 +7,13 @@ doubao2api.exe
 doubao2api-data.json
 *.tmp
 
-# 逆向复刻中间产物（体积大且可由 .recon/extract_pak.py 重新生成）
+# 逆向复刻中间产物（体积大且可由 tools/ 下脚本重新生成）
 .recon/
 extract/
+
+# Python 缓存
+__pycache__/
+*.pyc
 
 # 编辑器 / 系统
 .idea/

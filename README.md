@@ -42,7 +42,7 @@ AI 能力由内部代号 **`samantha`** 的服务提供，账号资料走 **`ali
 | 凭据加密 | **两层**：DPAPI 保护的主密钥（`Local State`）+ AES-256-GCM 逐条加密 |
 | 域名绑定 | Chrome 130+ 起，Cookie 明文前置 32 字节 `sha256(host_key)`，解密后须剥离 |
 
-### 1.1 `biz.pak` 包格式
+### 1.1 `biz.pak` 包格式与还原流程
 
 ```text
 header : version(u32 LE) | reserved(u32) | count(u32)
@@ -50,16 +50,26 @@ index  : count × { id(u16 LE) | offset(u32 LE) }   // 按 offset 升序
 data   : 第 i 个 blob = [offset_i, offset_{i+1})，多为 gzip
 ```
 
-本机实测 `count = 10368`。解包脚本见 `tools/extract_pak.py`（可随时重跑）：
+本机实测 `count = 10368`。还原分两步（均可随时重跑）：
 
 ```bash
-python tools/extract_pak.py "F:\IDE\DoubaoWork\app\local_webcontents\biz\biz.pak" .recon/biz_pak
+# 1) 拆包：把 pak 拆成一堆 blob（约 580 MB，产物勿入库）
+python tools/extract_pak.py "F:\IDE\DoubaoWork\app\local_webcontents\biz\biz.pak" .recon/extract
+
+# 2) 还原源码：解出 35 份 source map 的 sourcesContent，按原目录结构落盘
+python tools/extract_sources.py .recon/extract .recon/src --stats
 ```
+
+路径映射规则：`webpack://<bundle>/../../X` → `_/_/X`，
+`../../../node_modules/x` → `_/_/_/nm/x`（即 `..` → `_`、`node_modules` → `nm`）。
+
+> `extract_sources.py` 在 Windows 下用 `\\?\` 前缀绕开 MAX_PATH，否则 `.pnpm`
+> 里那些超长路径会被静默跳过（实测能多还原 46 个文件）。
 
 ### 1.2 关键代码位置
 
 `biz.pak` 内含 35 份 **source map**，其中 `sourcesContent` 保存了原始 TypeScript，
-可完整还原 3012 个源文件。几个决定性的位置：
+实测可还原 **3010** 个源文件。几个决定性的位置：
 
 | 事实 | 位置 |
 | --- | --- |
@@ -67,7 +77,10 @@ python tools/extract_pak.py "F:\IDE\DoubaoWork\app\local_webcontents\biz\biz.pak
 | 请求体构造 | `L1-Arch/business/api/src/flow-api.ts` 及各 `api/*/index.ts` |
 | 公参定义 | `src/init/params/index.ts`：`aid` / `device_id` / `web_id` / `version_code` |
 | 应用常量 | `Infra/constants/src/index.ts`：`VERSION_CODE=20800`、`DESKTOP_DOUBAO_WORK_APP_ID=1044603` |
-| 内容块枚举 | `block_type`：`10000` 文本、`10040` 思考、`10024` 工具、`10025` 联网搜索、`10052` 附件 |
+| 内容块枚举 | `block_type`：`10000` 文本、`10040` 思考、`10024` 工具、`10025` 联网搜索、`10052` 附件、`2074` 生成结果 |
+| 技能枚举 | `SkillType`：`3` 图像、`9` 音乐、`17` 视频（即 `option.action_bar_skill_id`） |
+| 画布操作枚举 | `canvas_type`：`GenImage=10`、`GenVideo=50`（创意画布执行接口） |
+| 消息内容类型 | `content_type`：`70` 音乐成品、`71` 歌词、`2021` 视频生成、`2074` 生成结果 |
 
 ### 1.3 与参考项目 AStudio2API 的对照
 
@@ -568,7 +581,8 @@ doubao2api/
 │       ├── web.go                 # 控制台单页的内嵌与响应头
 │       └── web/index.html         # 控制台单页（单文件，无外部依赖）
 ├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
-├── tools/extract_pak.py           # biz.pak 解包脚本（可重跑，用于协议比对）
+├── tools/extract_pak.py           # biz.pak 解包脚本（第一步，可重跑）
+├── tools/extract_sources.py       # source map → 源码还原脚本（第二步，可重跑）
 ├── doubao2api-data.example.json   # 脱敏状态文件样例
 ├── .gitignore
 ├── go.mod                         # 无 require，纯标准库
@@ -613,8 +627,9 @@ doubao2api/
   请勿公开暴露到公网或用于商业转售。
 - 凭据即账号。`doubao2api-data.json` 里的 Cookie 等同于账号密码，
   **不要提交到仓库或分享**。
-- 逆向产物 `.recon/`（`biz.pak` 解包结果、source map 还原的第三方源码）
-  体积大且含第三方版权内容，已加入 `.gitignore`，仅作本地协议比对。
+- 逆向产物 `.recon/`（`biz.pak` 解包结果 `extract/` 约 580 MB、source map
+  还原的第三方源码 `src/` 约 16 MB）体积大且含第三方版权内容，已加入 `.gitignore`，
+  仅作本地协议比对；两者都可由 `tools/` 下两个脚本重新生成，不入库也不影响构建。
 - 上游可能随时调整协议或启用风控。若出现 `gateway-error`，
   请重新登录桌面端后重新导入账号。
 
