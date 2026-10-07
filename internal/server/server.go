@@ -2,6 +2,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"log"
 	"net"
@@ -43,14 +45,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.withAuth(s.handleModels))
 	mux.HandleFunc("/v1/chat/completions", s.withAuth(s.handleChatCompletions))
 
-	// 控制台 API
-	mux.HandleFunc("/admin/api/state", s.handleAdminState)
-	mux.HandleFunc("/admin/api/accounts", s.handleAdminAccounts)
-	mux.HandleFunc("/admin/api/keys", s.handleAdminKeys)
-	mux.HandleFunc("/admin/api/logs", s.handleAdminLogs)
-	mux.HandleFunc("/admin/api/stats", s.handleAdminStats)
-	mux.HandleFunc("/admin/api/settings", s.handleAdminSettings)
-	mux.HandleFunc("/admin/api/checkin", s.handleAdminCheckin)
+	// 控制台 API（统一走管理鉴权 + 同源校验）
+	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))
+	mux.HandleFunc("/admin/api/accounts", s.withAdminAuth(s.handleAdminAccounts))
+	mux.HandleFunc("/admin/api/keys", s.withAdminAuth(s.handleAdminKeys))
+	mux.HandleFunc("/admin/api/logs", s.withAdminAuth(s.handleAdminLogs))
+	mux.HandleFunc("/admin/api/stats", s.withAdminAuth(s.handleAdminStats))
+	mux.HandleFunc("/admin/api/settings", s.withAdminAuth(s.handleAdminSettings))
+	mux.HandleFunc("/admin/api/checkin", s.withAdminAuth(s.handleAdminCheckin))
 
 	mux.HandleFunc("/", s.handleRoot)
 
@@ -76,9 +78,10 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // writeCORSHeaders 仅在来源通过校验时写入跨域响应头。
 //
 // allowed 为空串时不写任何 CORS 头（浏览器按同源策略拦截）；
+// 绝不回显通配符 "*"（本网关从不允许任意来源）；
 // 从不发送 Access-Control-Allow-Credentials，因此不存在凭据泄露面。
 func writeCORSHeaders(w http.ResponseWriter, allowed string) {
-	if allowed == "" {
+	if allowed == "" || allowed == "*" {
 		return
 	}
 	h := w.Header()
@@ -152,6 +155,116 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// withAdminAuth 保护控制台接口。
+//
+// 鉴权策略：
+//   - 已设置管理密码：必须通过 X-Admin-Password 或 Authorization: Bearer 提供；
+//   - 未设置管理密码：仅允许来自本机环回的请求（避免局域网内裸奔）。
+//
+// 另外对写操作（非 GET/HEAD/OPTIONS）做同源校验，阻断跨站请求伪造。
+func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if pw := s.Store.Settings().AdminPassword; pw != "" {
+			if !secureEqual(adminPasswordFrom(r), pw) {
+				writeErr(w, http.StatusUnauthorized, "管理密码缺失或错误", "invalid_request_error")
+				return
+			}
+		} else if !isLoopbackAddr(r.RemoteAddr) {
+			writeErr(w, http.StatusForbidden, "未设置管理密码，管理接口仅允许本机访问", "invalid_request_error")
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			if !s.adminSameOrigin(r) {
+				writeErr(w, http.StatusForbidden, "跨站请求被拒绝", "invalid_request_error")
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// adminPasswordFrom 从请求头提取管理密码。
+func adminPasswordFrom(r *http.Request) string {
+	if v := r.Header.Get("X-Admin-Password"); v != "" {
+		return v
+	}
+	if h := r.Header.Get("Authorization"); h != "" {
+		if v, ok := strings.CutPrefix(h, "Bearer "); ok {
+			return strings.TrimSpace(v)
+		}
+		return strings.TrimSpace(h)
+	}
+	return ""
+}
+
+// secureEqual 以恒定时间比较两个字符串（先哈希，避免长度泄露）。
+func secureEqual(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
+
+// adminSameOrigin 校验写操作来源：与请求 Host 同源，或命中显式 CORS 允许列表。
+//
+// 非浏览器客户端（curl / SDK）通常不带 Origin 头，直接放行。
+func (s *Server) adminSameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	if cfg := strings.TrimSpace(s.Store.Settings().CORSOrigin); cfg != "" {
+		for _, entry := range strings.Split(cfg, ",") {
+			entry = strings.TrimSpace(entry)
+			if entry != "" && entry != "*" && strings.EqualFold(entry, origin) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isLoopbackAddr 判断 TCP 远端地址是否为本机环回。
+func isLoopbackAddr(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// sanitizedSettings 返回可下发给前端的设置（管理密码不外泄）。
+func sanitizedSettings(st store.Settings) map[string]any {
+	return map[string]any{
+		"model_aliases":       st.ModelAliases,
+		"request_timeout_sec": st.RequestTimeout,
+		"max_retries":         st.MaxRetries,
+		"log_keep":            st.LogKeep,
+		"cors_origin":         st.CORSOrigin,
+		"admin_password_set":  st.AdminPassword != "",
+	}
+}
+
+// resolveKeyRef 把完整密钥或脱敏密钥解析为完整密钥。
+func (s *Server) resolveKeyRef(ref string) string {
+	for _, k := range s.Store.Keys() {
+		if k.Key == ref || mask(k.Key) == ref {
+			return k.Key
+		}
+	}
+	return ref
 }
 
 func extractKey(r *http.Request) string {
@@ -244,7 +357,7 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 		"accounts": safe,
 		"keys":     safeKeys,
 		"models":   registry.List(s.Store.Settings().ModelAliases),
-		"settings": s.Store.Settings(),
+		"settings": sanitizedSettings(s.Store.Settings()),
 		"stats":    s.Store.Stats(),
 	})
 }
@@ -268,18 +381,22 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 
 	switch body.Action {
 	case "import":
-		res, err := doubao.ImportFromDesktop(body.Dir)
+		results, err := doubao.ImportAllFromDesktop(body.Dir)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "导入失败: "+err.Error(), "invalid_request_error")
 			return
 		}
-		isNew := s.Store.UpsertAccount(res.Account)
+		imported := make([]map[string]any, 0, len(results))
+		for _, res := range results {
+			isNew := s.Store.UpsertAccount(res.Account)
+			imported = append(imported, map[string]any{
+				"id": res.Account.ID, "name": res.Account.Name,
+				"profile": res.Profile, "dir": res.Dir,
+				"cookies": res.Cookies, "new": isNew,
+			})
+		}
 		_ = s.Store.Save()
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "profile": res.Profile, "dir": res.Dir,
-			"cookies": res.Cookies, "new": isNew, "id": res.Account.ID,
-			"name": res.Account.Name,
-		})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": len(imported), "imported": imported})
 	case "manual":
 		acct, err := doubao.AccountFromCookieString(body.Cookies, body.Name)
 		if err != nil {
@@ -316,7 +433,16 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminKeys(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"keys": s.Store.Keys()})
+		// 脱敏下发：完整密钥只在创建时返回一次
+		keys := s.Store.Keys()
+		safe := make([]map[string]any, 0, len(keys))
+		for _, k := range keys {
+			safe = append(safe, map[string]any{
+				"key": mask(k.Key), "name": k.Name, "enabled": k.Enabled,
+				"created_at": k.CreatedAt, "last_used": k.LastUsed, "requests": k.Requests,
+			})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"keys": safe})
 	case http.MethodPost:
 		var body struct {
 			Name string `json:"name"`
@@ -327,11 +453,11 @@ func (s *Server) handleAdminKeys(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": k.Key})
 	case http.MethodDelete:
 		q := r.URL.Query()
-		if k := q.Get("key"); k != "" {
-			_ = s.Store.DeleteKey(k)
+		if ref := q.Get("key"); ref != "" {
+			_ = s.Store.DeleteKey(s.resolveKeyRef(ref))
 		}
-		if k := q.Get("toggle"); k != "" {
-			_ = s.Store.ToggleKey(k)
+		if ref := q.Get("toggle"); ref != "" {
+			_ = s.Store.ToggleKey(s.resolveKeyRef(ref))
 		}
 		_ = s.Store.Save()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -361,7 +487,7 @@ func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSON(w, http.StatusOK, s.Store.Settings())
+		writeJSON(w, http.StatusOK, sanitizedSettings(s.Store.Settings()))
 		return
 	}
 	var body struct {
@@ -370,6 +496,7 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		MaxRetries     *int              `json:"max_retries"`
 		LogKeep        *int              `json:"log_keep"`
 		CORSOrigin     *string           `json:"cors_origin"`
+		AdminPassword  *string           `json:"admin_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败", "invalid_request_error")
@@ -391,9 +518,12 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		if body.CORSOrigin != nil {
 			st.CORSOrigin = *body.CORSOrigin
 		}
+		if body.AdminPassword != nil {
+			st.AdminPassword = strings.TrimSpace(*body.AdminPassword)
+		}
 	})
 	_ = s.Store.Save()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": s.Store.Settings()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": sanitizedSettings(s.Store.Settings())})
 }
 
 // handleAdminCheckin 对全部（或指定）账号做一次连通性探测。

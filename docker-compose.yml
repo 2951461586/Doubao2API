@@ -27,6 +27,9 @@ services:
       DOUBAO_HOST: 0.0.0.0
       DOUBAO_PORT: "10086"
       DOUBAO_DATA_PATH: /data/doubao2api-data.json
+      # 管理密码：设置后 /admin/api/* 必须携带 X-Admin-Password 头。
+      # 未设置时管理接口仅允许本机（容器内回环）访问，因此对外暴露时务必设置。
+      DOUBAO_ADMIN_PASSWORD: ${DOUBAO_ADMIN_PASSWORD:-}
 
     # 容器内没有 Windows 桌面端，DPAPI 不可用，因此关闭自动导入；
     # 账号请通过控制台 API 手工录入 Cookie（见 README「Docker 部署」）。

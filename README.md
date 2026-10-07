@@ -174,6 +174,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 | 出网 | 容器需能访问 `www.doubao.com` |
 | 健康检查 | `GET /ping`（免鉴权） |
 | 自动导入 | 容器内**不可用**（DPAPI 是 Windows 专有），故用 `-no-import` 启动 |
+| 管理密码 | 通过 `DOUBAO_ADMIN_PASSWORD` 设置；不设置则管理接口仅回环可达 |
 
 #### 容器内如何添加账号
 
@@ -187,6 +188,7 @@ docker run -d --name doubao2api --restart unless-stopped \
     ```bash
     curl -X POST http://127.0.0.1:10086/admin/api/accounts \
       -H "Content-Type: application/json" \
+      -H "X-Admin-Password: $DOUBAO_ADMIN_PASSWORD" \
       -d '{
             "action": "manual",
             "name": "我的账号",
@@ -194,11 +196,15 @@ docker run -d --name doubao2api --restart unless-stopped \
           }'
     ```
 
+    > 若设置了 `DOUBAO_ADMIN_PASSWORD`，管理接口必须带 `X-Admin-Password` 头；
+    > 未设置时容器内只能从回环访问，故请通过环境变量设置。
+
 3. 验证连通性：
 
     ```bash
     curl -X POST http://127.0.0.1:10086/admin/api/checkin \
-      -H "Content-Type: application/json" -d '{}'
+      -H "Content-Type: application/json" \
+      -H "X-Admin-Password: $DOUBAO_ADMIN_PASSWORD" -d '{}'
     ```
 
 > 未提供 `device_id` / `web_id` 时网关会生成随机占位值（上游可接受）。
@@ -257,6 +263,30 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 | `/admin/api/settings` | GET / POST | 设置 |
 | `/admin/api/checkin` | POST | 对账号做连通性探测 |
 
+#### 管理接口鉴权
+
+`/admin/api/*` 受两层保护：
+
+1. **身份**：未设置管理密码时**仅允许本机环回**访问（`127.0.0.1` / `::1`）；
+   设置了管理密码后，必须携带 `X-Admin-Password: <密码>`
+   或 `Authorization: Bearer <密码>`。密码以恒定时间比较。
+2. **CSRF**：写操作（非 GET/HEAD/OPTIONS）额外做同源校验——浏览器带
+   `Origin` 时，必须与请求 Host 同源或命中 CORS 允许列表；非浏览器
+   客户端（curl / SDK）通常不带 `Origin`，不受影响。
+
+密钥始终以脱敏形式返回（`sk-abc...wxyz`），**完整密钥仅在创建时返回一次**；
+`/admin/api/settings` 也只回传 `admin_password_set` 布尔值，不回传密码明文。
+
+```bash
+# 设置管理密码（未设置密码时仅本机可操作）
+curl -X POST http://127.0.0.1:10086/admin/api/settings \
+  -H "Content-Type: application/json" -d '{"admin_password":"换成你的密码"}'
+
+# 之后所有管理调用都要带密码
+curl http://127.0.0.1:10086/admin/api/state \
+  -H "X-Admin-Password: 换成你的密码"
+```
+
 ---
 
 ## 五、配置
@@ -269,6 +299,7 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 | `-port` | `DOUBAO_PORT` | `10086` | 监听端口 |
 | `-data` | `DOUBAO_DATA_PATH` | 可执行文件同目录 `doubao2api-data.json` | 状态文件 |
 | `-doubao-dir` | `DOUBAO_DATA_DIR` | 自动探测 | DoubaoWork 数据目录 |
+| `-admin-password` | `DOUBAO_ADMIN_PASSWORD` | 空 | 管理接口密码（非空时覆盖状态文件中的设置） |
 | `-import` | — | — | 只导入一次后退出 |
 | `-no-import` | — | — | 启动时不自动导入 |
 
@@ -292,6 +323,9 @@ doubao2api-data.json      # 含账号 Cookie / API 密钥
   且**从不发送** `Access-Control-Allow-Credentials`。
 - 需局域网访问时，在设置里显式填写逗号分隔的来源；`*` 通配符不生效。
 - 默认监听 `127.0.0.1`，不暴露到局域网；需要时用 `-host 0.0.0.0` 显式放开。
+- **管理接口**：未设密码时仅本机可访问，设置后必须带 `X-Admin-Password`；
+  写操作做同源校验以阻断 CSRF。对外暴露（局域网 / 反向代理）时**务必设置
+  管理密码**，否则控制台将不可达（而非裸奔）。
 - 请求日志**只记元信息**（模型、耗时、长度），不落对话内容。
 
 ---

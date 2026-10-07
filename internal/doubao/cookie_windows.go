@@ -215,6 +215,18 @@ type ImportResult struct {
 //
 // explicitDir 为空时自动探测；返回第一个含有效豆包会话的 profile。
 func ImportFromDesktop(explicitDir string) (*ImportResult, error) {
+	all, err := ImportAllFromDesktop(explicitDir)
+	if err != nil {
+		return nil, err
+	}
+	return all[0], nil
+}
+
+// ImportAllFromDesktop 导入**全部**含有效豆包会话的 profile。
+//
+// 桌面端可能有多个 profile（Default / Profile 2 / ...），每个登录了不同账号，
+// 这里全部收集为独立账号，供账号池轮询使用。
+func ImportAllFromDesktop(explicitDir string) ([]*ImportResult, error) {
 	var lastErr error
 	for _, userData := range DoubaoWorkUserDataDirs(explicitDir) {
 		if _, err := os.Stat(userData); err != nil {
@@ -226,6 +238,7 @@ func ImportFromDesktop(explicitDir string) (*ImportResult, error) {
 			lastErr = err
 			continue
 		}
+		var out []*ImportResult
 		for _, prof := range chromiumProfiles(userData) {
 			rows, err := readProfileCookies(userData, prof, key)
 			if err != nil || len(rows) == 0 {
@@ -249,7 +262,10 @@ func ImportFromDesktop(explicitDir string) (*ImportResult, error) {
 					acct.WebID = web
 				}
 			}
-			return &ImportResult{Account: acct, Profile: prof, Dir: userData, Cookies: len(rows)}, nil
+			out = append(out, &ImportResult{Account: acct, Profile: prof, Dir: userData, Cookies: len(rows)})
+		}
+		if len(out) > 0 {
+			return out, nil
 		}
 	}
 	if lastErr == nil {

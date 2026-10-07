@@ -88,7 +88,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		convID   string
 	)
 
-	err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
+	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		return s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
 			if c.ConvID != "" {
 				convID = c.ConvID
@@ -102,7 +102,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		})
 	})
 	if err != nil {
-		s.record(key, model.ID, false, http.StatusBadGateway, start, len(upReq.Text), 0, err)
+		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(upReq.Text), 0, err)
 		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
 		return
 	}
@@ -124,7 +124,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		"usage":           estimateUsage(upReq.Text, out.String()),
 		"conversation_id": convID,
 	}
-	s.record(key, model.ID, true, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
+	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -145,7 +145,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	id := "chatcmpl-" + doubao.RandomHex(12)
 	created := time.Now().Unix()
 	outLen := 0
-	roleSent := false
 
 	send := func(delta map[string]any, finish any) {
 		chunk := map[string]any{
@@ -169,10 +168,9 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 
 	// 首块先发 role，符合 OpenAI 约定
 	send(map[string]any{"role": "assistant", "content": ""}, nil)
-	roleSent = true
 
 	var streamErr error
-	err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
+	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		return s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
 			if c.ErrorCode != 0 {
 				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
@@ -192,7 +190,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 			return nil
 		})
 	})
-	_ = roleSent
 	if err != nil {
 		streamErr = err
 		send(map[string]any{"content": "\n[错误] " + err.Error()}, nil)
@@ -202,14 +199,16 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
-	s.record(key, model.ID, streamErr == nil, statusOf(streamErr), start, len(upReq.Text), outLen, streamErr)
+	s.record(key, acct, model.ID, true, statusOf(streamErr), start, len(upReq.Text), outLen, streamErr)
 }
 
 // withAccountRetry 选账号并在失败时换号重试。
-func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn func(context.Context, *doubao.Account) error) error {
+//
+// 返回本次实际使用的账号（可能为 nil），供调用方记录日志归属。
+func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn func(context.Context, *doubao.Account) error) (*doubao.Account, error) {
 	accts := s.Store.Accounts()
 	if len(accts) == 0 {
-		return fmt.Errorf("没有可用账号，请先在控制台导入或添加账号")
+		return nil, fmt.Errorf("没有可用账号，请先在控制台导入或添加账号")
 	}
 	maxTries := s.Store.Settings().MaxRetries
 	if maxTries <= 0 {
@@ -220,18 +219,20 @@ func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn
 	}
 
 	var lastErr error
+	var used *doubao.Account
 	for i := 0; i < maxTries; i++ {
 		acct := s.Store.NextAccount()
 		if acct == nil {
 			break
 		}
+		used = acct
 		cctx, cancel := context.WithTimeout(ctx, timeout)
 		err := fn(cctx, acct)
 		cancel()
 
 		if err == nil {
 			s.Store.MarkAccountResult(acct.ID, true, "")
-			return nil
+			return acct, nil
 		}
 		lastErr = err
 		s.Store.MarkAccountResult(acct.ID, false, err.Error())
@@ -243,7 +244,7 @@ func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn
 	if lastErr == nil {
 		lastErr = fmt.Errorf("全部账号均不可用")
 	}
-	return lastErr
+	return used, lastErr
 }
 
 // probeAccount 用一个最小请求探测账号可用性。
@@ -353,18 +354,22 @@ func estimateUsage(prompt, out string) map[string]any {
 	}
 }
 
-func (s *Server) record(key, model string, ok bool, status int, start time.Time, inLen, outLen int, err error) {
+// record 记录一次请求结果。
+//
+// acct 是本次实际使用的账号（可为 nil）；stream 标记是否为流式响应。
+func (s *Server) record(key string, acct *doubao.Account, model string, stream bool, status int, start time.Time, inLen, outLen int, err error) {
 	e := store.LogEntry{
 		Time:      time.Now().Unix(),
 		Key:       mask(key),
 		Model:     model,
+		Stream:    stream,
 		Status:    status,
 		LatencyMS: time.Since(start).Milliseconds(),
 		PromptLen: inLen,
 		OutputLen: outLen,
 	}
-	if a := s.Store.NextAccount(); a != nil {
-		e.Account = a.ID
+	if acct != nil {
+		e.Account = acct.ID
 	}
 	if err != nil {
 		e.Err = err.Error()

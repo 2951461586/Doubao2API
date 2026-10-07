@@ -19,3 +19,8 @@ type ImportResult struct {
 func ImportFromDesktop(string) (*ImportResult, error) {
 	return nil, fmt.Errorf("桌面端自动导入仅支持 Windows（DPAPI 不可用）")
 }
+
+// ImportAllFromDesktop 在非 Windows 平台不可用。
+func ImportAllFromDesktop(string) ([]*ImportResult, error) {
+	return nil, fmt.Errorf("桌面端自动导入仅支持 Windows（DPAPI 不可用）")
+}
