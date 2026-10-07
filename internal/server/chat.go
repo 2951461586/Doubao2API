@@ -22,6 +22,9 @@ type chatRequest struct {
 	Stream         bool          `json:"stream"`
 	ConversationID string        `json:"conversation_id"` // 豆包原生多轮
 	BotID          string        `json:"bot_id"`
+	// Skill 是本网关的扩展字段，用于显式指定上游技能
+	// （对应 option.action_bar_skill_id）：名称或数值，如 "image" / "music" / "video"。
+	Skill any `json:"skill"`
 }
 
 type chatMessage struct {
@@ -65,6 +68,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		ThinkLevel:     model.ThinkLevel,
 		BotID:          req.BotID,
 		ConversationID: req.ConversationID,
+		SkillID:        resolveSkill(req.Skill),
 		Images:         images,
 		Files:          files,
 	}
@@ -495,6 +499,30 @@ func newCreationURLs(creations []doubao.Creation, seen map[string]bool) []string
 		urls = append(urls, cr.URL)
 	}
 	return urls
+}
+
+// resolveSkill 解析请求里的技能字段（名称或数值）。
+//
+// 取值对齐上游 SkillType（来自桌面端 bundle 的枚举，与 /samantha/skill/list 一致）：
+// 3=图像生成、9=音乐生成、17=视频生成。
+//
+// 注意：图像生成对免费账号可用；音乐 / 视频属会员能力，实测上游会返回
+// 710022004 rate limited（由 shark_admin 风控/配额判定）。
+func resolveSkill(v any) int {
+	switch s := v.(type) {
+	case float64:
+		return int(s)
+	case string:
+		switch strings.ToLower(strings.TrimSpace(s)) {
+		case "image", "image_gen", "imagegeneration":
+			return doubao.SkillImageGen
+		case "music", "music_gen", "musicgeneration":
+			return doubao.SkillMusicGen
+		case "video", "video_gen", "videogeneration":
+			return doubao.SkillVideoGen
+		}
+	}
+	return 0
 }
 
 // estimateUsage 给出粗略的用量估算（豆包不返回 token 数）。

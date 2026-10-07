@@ -98,8 +98,10 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel()
 		n, ncr := 0, 0
+		var txt strings.Builder
 		err := c.ChatStream(ctx, a, doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill}, func(ch doubao.CompletionChunk) error {
 			n++
+			txt.WriteString(ch.Text)
 			if ch.ErrorCode != 0 {
 				fmt.Println("ERRCODE:", ch.ErrorCode, ch.ErrorMsg)
 			}
@@ -114,6 +116,7 @@ func main() {
 			return nil
 		})
 		fmt.Println("chunks:", n, "creations:", ncr, "err:", err)
+		fmt.Println("REPLY:", txt.String())
 		return
 	}
 

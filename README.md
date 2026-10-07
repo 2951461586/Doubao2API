@@ -226,6 +226,10 @@ docker run -d --name doubao2api --restart unless-stopped \
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
 **未签发任何密钥时允许无密钥调用**（首次使用的便利）；一旦在控制台创建密钥即强制校验。
 
+> **扩展字段**：聊天接口支持 `skill`（技能透传），可取 `image` / `music` / `video`
+> 或直接传数值（3 / 9 / 17），对应上游 `option.action_bar_skill_id`；
+> `content` 里可放 `input_file` / `image_url` 分片（见下文「多模态」）。
+
 #### 多轮会话
 
 两种方式都支持：
@@ -458,15 +462,42 @@ POST /top/v1?Action=CommitImageUpload   →  最终 uri
 `Content-CRC32` 是 **8 位十六进制**（不是十进制）、签名域为
 `service=imagex` / `region=cn-north-1` / `path=/top/v1`。
 
-### 6.5 文生图
+### 6.5 文生图与技能触发
 
-豆包的文生图**没有独立 REST 接口**（`/samantha/cozeplugin/txt2img` 实测返回 `no permission`），
-真正的链路是「图像生成」技能（`/samantha/skill/list` 中 `skill_type=3`，其
-`default_prompt` 为 `生成一张图片:${style} ${content}`）：把 prompt 套进该模板发一条对话，
-上游即以 `block_type=2074` 的 `creation_block.creations[]` 回传图片（实测 2048×2048，
-模型 Seedream）。`/v1/images/generations` 与聊天接口的 `images[]` 都基于此。
+技能通过 `option.action_bar_skill_id` 传入，取值就是上游的 `SkillType`
+（桌面端 bundle 枚举，与 `/samantha/skill/list` 的 `skill_type` 一致）：
+
+| skill_type | 技能 | 单次调用可用？ |
+| ---: | --- | --- |
+| 3 | 图像生成 | ✅ 可用（免费额度），`default_prompt` = `生成一张图片:${style} ${content}` |
+| 9 | 音乐生成 | ❌ 多步 + 配额门禁 |
+| 17 | 视频生成 | ❌ 多步 + 配额门禁 |
+
+图像生成**没有独立 REST 接口**（`/samantha/cozeplugin/txt2img` 实测 `no permission`），
+真正链路是把 prompt 套进技能模板发一条对话，上游以 `block_type=2074` 的
+`creation_block.creations[]` 回传（实测 2048×2048，Seedream）。
+`/v1/images/generations` 与聊天接口的 `images[]` 都基于此。
 
 > 实测：不带「生成一张图片:」前缀的裸提示词不会触发图像技能，模型会当普通问题回答。
+
+### 6.6 为何视频 / 音乐不能单次调用
+
+两者都**不是单发接口**，且受会员配额限制：
+
+- **视频**：带 `skill=17` 发「生成一段视频：…」后，上游先回一张**参数确认卡**
+  （模型 Seedance / 时长 15s / 比例 16:9），需用户确认后才真正开始生成；
+  直接走生成分支时会返回 `STREAM_ERROR`：
+  `{"error_code":710022004,"error_msg":"rate limited","extra":{"decision":"…\"from\":\"shark_admin\"…\"type\":\"verify\""}}`。
+- **音乐**：先产出**歌词**（`# 《标题》曲风：… ## 主歌1 …`），再进入谱曲步骤；
+  相关接口为 `/alice/media/bigmusic/lyrics`（`prompt`/`instruction_options`）
+  与 `/alice/bot/list_music_gen_template`。
+- 文案佐证：`Doubao_paywall_free_video_quota_reached_cn`（免费版视频次数上限）、
+  `doubao_member_music_generation_quota_cn`（音乐生成限额）。
+- 结果块类型：`VideoGeneration=2021`、`CreationMulti=2022`；
+  音乐内容类型 `LyricsToSongMusic=70` / `LyricsToSongLyric=71`。
+
+因此网关只把技能选择透传出去（`skill` 字段），**不伪造**多步确认流程。
+带配额账号可以自行走完整交互。
 
 ### 6.6 扫码登录
 
@@ -534,10 +565,12 @@ doubao2api/
 - [x] 文件解析（PDF / Office / 文本，附件 `type=3`）
 - [x] 文生图（`/v1/images/generations`，基于图像生成技能 `skill_type=3`）
 - [x] 扫码登录（passport SSO，`/admin/api/login/qrcode`）
+- [x] 技能透传（聊天接口 `skill` 字段，可显式指定 3/9/17）
 
 ### 后续阶段
 
-- [ ] 文生视频 / 文生音乐（技能 `skill_type=17` / `9` 存在，但未找到可用的创建链路）
+- [ ] 文生视频 / 文生音乐：**已查明为多步交互 + 会员配额**，非单发接口（见 6.6），
+      需先实现参数确认卡的多轮协议，且当前账号无配额可验证
 
 ---
 
