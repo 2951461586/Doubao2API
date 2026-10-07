@@ -89,7 +89,11 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 	)
 
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		return s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
+		req, err := s.withUploadedImages(ctx, acct, upReq)
+		if err != nil {
+			return err
+		}
+		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
 			if c.ConvID != "" {
 				convID = c.ConvID
 			}
@@ -171,7 +175,11 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 
 	var streamErr error
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		return s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
+		req, err := s.withUploadedImages(ctx, acct, upReq)
+		if err != nil {
+			return err
+		}
+		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
 			if c.ErrorCode != 0 {
 				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
 			}
@@ -245,6 +253,59 @@ func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn
 		lastErr = fmt.Errorf("全部账号均不可用")
 	}
 	return used, lastErr
+}
+
+// withUploadedImages 确保每张图片都有可用于 content_block 的上游 uri。
+//
+// 仅有外链（CDNURL）的图片由网关代下载；仅有原始字节（Data）的图片直接上传。
+// 两者都会转存到豆包资源中心——上游不会自行抓取外部图片（已实测）。
+func (s *Server) withUploadedImages(ctx context.Context, acct *doubao.Account, req doubao.ChatRequest) (doubao.ChatRequest, error) {
+	if len(req.Images) == 0 {
+		return req, nil
+	}
+	imgs := make([]doubao.ImageAttachment, len(req.Images))
+	copy(imgs, req.Images)
+	for i := range imgs {
+		if imgs[i].URI != "" {
+			continue
+		}
+		if len(imgs[i].Data) == 0 && imgs[i].CDNURL != "" {
+			data, mime, err := doubao.FetchImage(ctx, imgs[i].CDNURL)
+			if err != nil {
+				return req, fmt.Errorf("获取图片失败: %w", err)
+			}
+			imgs[i].Data = data
+			if imgs[i].Format == "" {
+				imgs[i].Format = strings.TrimPrefix(mime, "image/")
+			}
+		}
+		if len(imgs[i].Data) == 0 {
+			continue
+		}
+		uri, err := s.Up.UploadImage(ctx, acct, imgs[i])
+		if err != nil {
+			return req, fmt.Errorf("图片上传失败: %w", err)
+		}
+		imgs[i].URI = uri
+		imgs[i].Data = nil
+		imgs[i].CDNURL = ""
+	}
+	req.Images = imgs
+	return req, nil
+}
+
+// imageAttachmentFromURL 把 OpenAI 的 image_url 转为待上传的图片附件。
+//
+// data: 内联图片直接解出字节；http(s) 外链记为 CDNURL，发送前由网关代下载。
+func imageAttachmentFromURL(raw string) doubao.ImageAttachment {
+	if mime, data, ok := doubao.ParseDataURL(raw); ok {
+		format := strings.TrimPrefix(mime, "image/")
+		if format == "" {
+			format = "png"
+		}
+		return doubao.ImageAttachment{Name: "image." + format, Format: format, Data: data}
+	}
+	return doubao.ImageAttachment{Name: "image.png", Format: "png", CDNURL: raw}
 }
 
 // probeAccount 用一个最小请求探测账号可用性。
@@ -334,7 +395,7 @@ func extractContent(v any) (string, []doubao.ImageAttachment) {
 					url, _ = pm["image_url"].(string)
 				}
 				if url != "" {
-					imgs = append(imgs, doubao.ImageAttachment{CDNURL: url, Name: "image.png", Format: "png"})
+					imgs = append(imgs, imageAttachmentFromURL(url))
 				}
 			}
 		}

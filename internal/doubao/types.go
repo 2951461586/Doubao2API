@@ -88,7 +88,10 @@ type ChatRequest struct {
 	Files  []FileAttachment
 }
 
-// ImageAttachment 图片附件（已上传到上游存储）。
+// ImageAttachment 图片附件。
+//
+// URI 非空时直接作为 block_type=10052 的 image.uri 使用；
+// 否则若 Data 非空，会在发送前先上传到豆包资源中心取得 URI。
 type ImageAttachment struct {
 	Name   string
 	URI    string
@@ -96,6 +99,8 @@ type ImageAttachment struct {
 	Width  int
 	Height int
 	Format string
+	// Data 是待上传的原始图片字节（仅当 URI 为空时使用）。
+	Data []byte
 }
 
 // FileAttachment 文件附件（已上传到上游存储）。

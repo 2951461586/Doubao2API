@@ -219,6 +219,7 @@ docker run -d --name doubao2api --restart unless-stopped \
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
 | `/v1/chat/completions` | POST | OpenAI Chat Completions，流式 / 非流式 |
+| `/v1/messages` | POST | Anthropic Messages，流式 / 非流式 |
 | `/v1/models` | GET | 模型清单（含 `doubao.think_level` 等扩展字段） |
 
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
@@ -244,6 +245,47 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 
 流式响应中，`conversation_id` 通过 SSE 注释块回传：`: conversation_id=3844...`。
 
+#### 图片理解（多模态）
+
+`content` 分片里放 `image_url` 即可，两种写法都支持：
+
+```jsonc
+{"role":"user","content":[
+  {"type":"text","text":"图里有什么？"},
+  // 1) 内联 data URL
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBOR..."}},
+  // 2) 公网外链（网关代下载后转存）
+  {"type":"image_url","image_url":{"url":"https://example.com/a.png"}}
+]}
+```
+
+**上游不会自行抓取外链**（实测会回「请上传图片」），因此网关先把图片转存到豆包资源中心，
+再把得到的 `uri` 填进 `block_type=10052` 附件块。外链大小上限 10 MB。
+
+#### Anthropic `/v1/messages`
+
+同一套上游能力也以 Anthropic 协议暴露，便于 Anthropic SDK / Claude Code 直连：
+
+```bash
+curl http://127.0.0.1:10086/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{"model":"doubao-think","max_tokens":512,"stream":true,
+       "system":"你是简洁助手。",
+       "messages":[{"role":"user","content":"用一句话解释 SSE。"}]}'
+```
+
+| Anthropic 概念 | 映射 |
+| --- | --- |
+| `system`（字符串或文本块数组） | 压平为提示前缀 |
+| `messages[].content` 文本块 | 正文 |
+| `content[].type=image`（`base64` / `url`） | 转存上游 → `block_type=10052` |
+| `tool_result` | 按文本回流；`tool_use` / `thinking` 不回灌 |
+| 思维链 | 流式为 `thinking` 块 + `thinking_delta` |
+| SSE 事件 | `message_start` → `content_block_start/delta/stop` → `message_delta` → `message_stop` |
+| 错误 | `{"type":"error","error":{"type":"api_error"\|"invalid_request_error",…}}` |
+
+`max_tokens` / `temperature` / `top_p` / `stop_sequences` 目前不透传（豆包不按这些路由）。
+
 ### 4.2 探活接口
 
 | 端点 | 方法 | 说明 |
@@ -252,6 +294,9 @@ curl ... -d '{"model":"doubao","conversation_id":"38445411928226562",
 | `/ping` | GET | 纯文本 `pong`（免鉴权，供容器探针） |
 
 ### 4.3 控制台接口
+
+浏览器直接打开 <http://127.0.0.1:10086/> 即为内置控制台单页（账号 / 密钥 / 日志 / 统计 / 设置）。
+单文件内嵌、无外部依赖，调用的就是下面这些 JSON 接口：
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
@@ -372,6 +417,21 @@ Cookies(SQLite) ──[b-tree 遍历 → 记录解码 → AES-256-GCM]──▶ 
 - 单次请求内失败自动换号重试（默认 3 次，有界）；
 - 客户端断开（context 取消）时立即停止重试。
 
+### 6.4 图片上传链路
+
+上游只认自家资源中心的 `uri`，外链一律无效，因此网关内置了转存：
+
+```text
+POST /alice/resource/prepare_upload     →  STS 凭证 + service_id + upload_host
+GET  /top/v1?Action=ApplyImageUpload    →  StoreUri / Auth / SessionKey（AWS SigV4 签名）
+POST {UploadHost}/upload/v1/{StoreUri}  →  直传字节（Authorization + Content-CRC32）
+POST /top/v1?Action=CommitImageUpload   →  最终 uri
+```
+
+踩过的坑：`FileExtension` 要带前导点、`UploadNum` 只在批量上传时出现、
+`Content-CRC32` 是 **8 位十六进制**（不是十进制）、签名域为
+`service=imagex` / `region=cn-north-1` / `path=/top/v1`。
+
 ---
 
 ## 七、项目结构
@@ -381,18 +441,23 @@ doubao2api/
 ├── main.go                        # 入口：配置、启动、自动导入、优雅关闭
 ├── internal/
 │   ├── doubao/
-│   │   ├── types.go               # 账号 / 内容块枚举 / 档位常量
+│   │   ├── types.go               # 账号 / 内容块枚举 / 档位常量 / 图片附件
 │   │   ├── util.go                # UUID、指纹、Cookie 串解析
 │   │   ├── sqlite.go              # 极简 SQLite 只读解析器（零依赖）
-│   │   ├── cookie_windows.go      # DPAPI + AES-GCM + 域名前缀剥离
+│   │   ├── cookie_windows.go      # DPAPI + AES-GCM + 域名前缀剥离 + 多 profile 导入
 │   │   ├── cookie_other.go        # 非 Windows 平台占位
 │   │   ├── sse.go                 # SSE 事件流解析
+│   │   ├── upload.go              # 图片转存：prepare_upload + imageX 直传（SigV4）
 │   │   └── client.go              # 上游客户端：公参、请求体、补丁流解析
 │   ├── store/store.go             # 状态持久化、账号池、密钥、统计、日志
 │   ├── registry/registry.go       # 模型清单与别名解析
 │   └── server/
 │       ├── server.go              # 路由、鉴权、CORS、控制台 API
-│       └── chat.go                # /v1/chat/completions、多轮、重试、日志
+│       ├── chat.go                # /v1/chat/completions、多轮、重试、图片转存
+│       ├── anthropic.go           # /v1/messages 双向转换
+│       ├── web.go                 # 控制台单页的内嵌与响应头
+│       └── web/index.html         # 控制台单页（单文件，无外部依赖）
+├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
 ├── tools/extract_pak.py           # biz.pak 解包脚本（可重跑，用于协议比对）
 ├── doubao2api-data.example.json   # 脱敏状态文件样例
 ├── .gitignore
@@ -414,12 +479,13 @@ doubao2api/
 - [x] 账号池轮询与有界重试
 - [x] 控制台 API（账号 / 密钥 / 日志 / 统计 / 设置），带管理鉴权与 CSRF 防护
 - [x] Docker 一键部署（多阶段构建、非 root、健康检查）
+- [x] 控制台单页（内嵌 HTML 面板，无外部依赖）
+- [x] Anthropic `/v1/messages` 双向转换（含 `thinking` 块与图片）
+- [x] 图片理解：`block_type=10052` 上传链路（`/alice/resource/prepare_upload` + imageX 直传）
 
 ### 后续阶段
 
-- [ ] 控制台单页（HTML 面板）
-- [ ] Anthropic `/v1/messages` 双向转换
-- [ ] 全模态：图片理解（`block_type=10052` 上传链路）、文件解析
+- [ ] 文件解析（PDF / Office 附件链路，`block_type=10052` type=3）
 - [ ] 文生图 / 文生视频 / 文生音乐（异步任务轮询）
 - [ ] 扫码 / 验证码登录（摆脱对本机桌面端的依赖）
 

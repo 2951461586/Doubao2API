@@ -44,6 +44,7 @@ func (s *Server) Handler() http.Handler {
 	// 推理
 	mux.HandleFunc("/v1/models", s.withAuth(s.handleModels))
 	mux.HandleFunc("/v1/chat/completions", s.withAuth(s.handleChatCompletions))
+	mux.HandleFunc("/v1/messages", s.withAuth(s.handleAnthropicMessages))
 
 	// 控制台 API（统一走管理鉴权 + 同源校验）
 	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))
@@ -78,10 +79,10 @@ func (s *Server) cors(next http.Handler) http.Handler {
 // writeCORSHeaders 仅在来源通过校验时写入跨域响应头。
 //
 // allowed 为空串时不写任何 CORS 头（浏览器按同源策略拦截）；
-// 绝不回显通配符 "*"（本网关从不允许任意来源）；
+// 含通配符的来源一律拒绝（本网关从不允许任意来源）；
 // 从不发送 Access-Control-Allow-Credentials，因此不存在凭据泄露面。
 func writeCORSHeaders(w http.ResponseWriter, allowed string) {
-	if allowed == "" || allowed == "*" {
+	if allowed == "" || hasWildcard(allowed) {
 		return
 	}
 	h := w.Header()
@@ -108,7 +109,7 @@ func (s *Server) corsOrigin(raw string) string {
 	if cfg := strings.TrimSpace(s.Store.Settings().CORSOrigin); cfg != "" {
 		for _, entry := range strings.Split(cfg, ",") {
 			entry = strings.TrimSpace(entry)
-			if entry != "" && entry != "*" && strings.EqualFold(entry, raw) {
+			if entry != "" && !hasWildcard(entry) && strings.EqualFold(entry, raw) {
 				return entry
 			}
 		}
@@ -124,6 +125,9 @@ func (s *Server) corsOrigin(raw string) string {
 	}
 	return u.Scheme + "://" + u.Hostname()
 }
+
+// hasWildcard 报告字符串是否含通配符字符（用于拒绝任意来源）。
+func hasWildcard(s string) bool { return strings.IndexByte(s, '*') >= 0 }
 
 // isLoopbackHost 判断主机名是否为本机环回地址。
 func isLoopbackHost(host string) bool {
@@ -227,7 +231,7 @@ func (s *Server) adminSameOrigin(r *http.Request) bool {
 	if cfg := strings.TrimSpace(s.Store.Settings().CORSOrigin); cfg != "" {
 		for _, entry := range strings.Split(cfg, ",") {
 			entry = strings.TrimSpace(entry)
-			if entry != "" && entry != "*" && strings.EqualFold(entry, origin) {
+			if entry != "" && !hasWildcard(entry) && strings.EqualFold(entry, origin) {
 				return true
 			}
 		}
@@ -320,14 +324,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
 
-// handleRoot 在控制台尚未实现前给出简短指引。
+// handleRoot 返回控制台单页；其余未知路径返回 404。
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		writeErr(w, http.StatusNotFound, "未找到该路径", "invalid_request_error")
 		return
 	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte("Doubao2API 正在运行。\n端点：/v1/chat/completions  /v1/models  /health\n"))
+	serveConsole(w, r)
 }
 
 // --- 控制台 API ---
