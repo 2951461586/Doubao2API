@@ -28,6 +28,29 @@ type chatRequest struct {
 	// InputSkill 对应上游 ext.input_skill（技能入参 JSON 字符串）。
 	// 音乐技能需要：{"lyric":"…","theme":"…","mood":"…","genre":"…","generation_type":"…"}
 	InputSkill string `json:"input_skill"`
+
+	// 新版客户端参数：推理强度 / 模型项 / 智能体模式 / 提及技能。
+	ReasoningEffort string   `json:"reasoning_effort"`
+	AgentMode       int      `json:"agent_mode"`
+	ModelItemKey    string   `json:"model_item_key"`
+	ModeID          string   `json:"mode_id"`
+	SelectionMode   bool     `json:"selection_mode"`
+	SelectedSkills  []string `json:"selected_skills"`
+	// Ext 透传到上游 ext（高级用法）。
+	Ext map[string]any `json:"ext"`
+	// Doubao 兼容嵌套写法：{"doubao":{"agent_mode":…}}。
+	Doubao *doubaoExtras `json:"doubao"`
+}
+
+// doubaoExtras 是 doubao 命名空间下的扩展参数。
+type doubaoExtras struct {
+	ReasoningEffort string         `json:"reasoning_effort"`
+	AgentMode       int            `json:"agent_mode"`
+	ModelItemKey    string         `json:"model_item_key"`
+	ModeID          string         `json:"mode_id"`
+	SelectionMode   bool           `json:"selection_mode"`
+	SelectedSkills  []string       `json:"selected_skills"`
+	Ext             map[string]any `json:"ext"`
 }
 
 type chatMessage struct {
@@ -66,15 +89,63 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 兼容 doubao 命名空间写法。
+	extras := req
+	if req.Doubao != nil {
+		if extras.ReasoningEffort == "" {
+			extras.ReasoningEffort = req.Doubao.ReasoningEffort
+		}
+		if extras.AgentMode == 0 {
+			extras.AgentMode = req.Doubao.AgentMode
+		}
+		if extras.ModelItemKey == "" {
+			extras.ModelItemKey = req.Doubao.ModelItemKey
+		}
+		if extras.ModeID == "" {
+			extras.ModeID = req.Doubao.ModeID
+		}
+		if !extras.SelectionMode {
+			extras.SelectionMode = req.Doubao.SelectionMode
+		}
+		if len(extras.SelectedSkills) == 0 {
+			extras.SelectedSkills = req.Doubao.SelectedSkills
+		}
+		if len(extras.Ext) == 0 {
+			extras.Ext = req.Doubao.Ext
+		}
+	}
+
+	// 技能：显式 skill 优先，否则用模型自带的技能（如 doubao-draw）。
+	skillID := resolveSkill(req.Skill)
+	if skillID == 0 {
+		skillID = model.Skill
+	}
+	if skillID != 0 {
+		text = doubao.WrapSkillPrompt(skillID, text, "")
+	}
+
+	// 推理强度：OpenAI 的 reasoning_effort 映射到上游 think 档位。
+	thinkLevel := model.ThinkLevel
+	if v := strings.TrimSpace(extras.ReasoningEffort); v != "" {
+		thinkLevel = thinkLevelFromEffort(v, thinkLevel)
+	}
+
 	upReq := doubao.ChatRequest{
-		Text:           text,
-		ThinkLevel:     model.ThinkLevel,
-		BotID:          req.BotID,
-		ConversationID: req.ConversationID,
-		SkillID:        resolveSkill(req.Skill),
-		InputSkill:     req.InputSkill,
-		Images:         images,
-		Files:          files,
+		Text:            text,
+		ThinkLevel:      thinkLevel,
+		BotID:           req.BotID,
+		ConversationID:  req.ConversationID,
+		SkillID:         skillID,
+		InputSkill:      req.InputSkill,
+		AgentMode:       extras.AgentMode,
+		ModelItemKey:    extras.ModelItemKey,
+		ModeID:          extras.ModeID,
+		SelectionMode:   extras.SelectionMode,
+		ReasoningEffort: extras.ReasoningEffort,
+		SelectedSkills:  extras.SelectedSkills,
+		Ext:             extras.Ext,
+		Images:          images,
+		Files:           files,
 	}
 
 	key := extractKey(r)
@@ -98,6 +169,12 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		convID       string
 		imageURLs    []string
 		seenCreation = map[string]bool{}
+		sources      []doubao.SearchSource
+		artifacts    []doubao.Artifact
+		music        []*doubao.MusicMessage
+		seenSource   = map[string]bool{}
+		seenArtifact = map[string]bool{}
+		seenMusic    = map[string]bool{}
 	)
 
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
@@ -113,6 +190,29 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
 			}
 			imageURLs = append(imageURLs, newCreationURLs(c.Creations, seenCreation)...)
+			for _, src := range c.Sources {
+				key := src.URL + "|" + src.Title
+				if src.URL == "" || seenSource[key] {
+					continue
+				}
+				seenSource[key] = true
+				sources = append(sources, src)
+			}
+			for _, a := range c.Artifacts {
+				key := a.ResourceID + a.ArtifactID + a.Title
+				if seenArtifact[key] {
+					continue
+				}
+				seenArtifact[key] = true
+				artifacts = append(artifacts, a)
+			}
+			if c.Music != nil {
+				key := c.Music.VideoID + c.Music.Title
+				if !seenMusic[key] {
+					seenMusic[key] = true
+					music = append(music, c.Music)
+				}
+			}
 			out.WriteString(c.Text)
 			thinking.WriteString(c.Thinking)
 			return nil
@@ -143,6 +243,15 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 	}
 	if len(imageURLs) > 0 {
 		resp["images"] = imageURLs
+	}
+	if len(sources) > 0 {
+		resp["sources"] = sources
+	}
+	if len(artifacts) > 0 {
+		resp["artifacts"] = artifacts
+	}
+	if len(music) > 0 {
+		resp["music"] = music
 	}
 	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
 	writeJSON(w, http.StatusOK, resp)
@@ -191,6 +300,9 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 
 	var streamErr error
 	seenCreation := map[string]bool{}
+	seenSource := map[string]bool{}
+	seenArtifact := map[string]bool{}
+	seenMusic := map[string]bool{}
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
@@ -202,6 +314,29 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 			}
 			if urls := newCreationURLs(c.Creations, seenCreation); len(urls) > 0 {
 				send(map[string]any{"images": urls}, nil)
+			}
+			for _, src := range c.Sources {
+				key := src.URL + "|" + src.Title
+				if src.URL == "" || seenSource[key] {
+					continue
+				}
+				seenSource[key] = true
+				send(map[string]any{"sources": []doubao.SearchSource{src}}, nil)
+			}
+			for _, a := range c.Artifacts {
+				key := a.ResourceID + a.ArtifactID + a.Title
+				if seenArtifact[key] {
+					continue
+				}
+				seenArtifact[key] = true
+				send(map[string]any{"artifacts": []doubao.Artifact{a}}, nil)
+			}
+			if c.Music != nil {
+				key := c.Music.VideoID + c.Music.Title
+				if !seenMusic[key] {
+					seenMusic[key] = true
+					send(map[string]any{"music": c.Music}, nil)
+				}
 			}
 			if c.ConvID != "" {
 				// 通过额外的 SSE 注释块回传会话 ID，便于客户端续接多轮
@@ -505,28 +640,25 @@ func newCreationURLs(creations []doubao.Creation, seen map[string]bool) []string
 	return urls
 }
 
-// resolveSkill 解析请求里的技能字段（名称或数值）。
-//
-// 取值对齐上游 SkillType（来自桌面端 bundle 的枚举，与 /samantha/skill/list 一致）：
-// 3=图像生成、9=音乐生成、17=视频生成。
-//
-// 注意：图像生成对免费账号可用；音乐 / 视频属会员能力，实测上游会返回
-// 710022004 rate limited（由 shark_admin 风控/配额判定）。
+// resolveSkill 解析请求里的技能字段（名称 / 别名 / 数值）。
 func resolveSkill(v any) int {
-	switch s := v.(type) {
-	case float64:
-		return int(s)
-	case string:
-		switch strings.ToLower(strings.TrimSpace(s)) {
-		case "image", "image_gen", "imagegeneration":
-			return doubao.SkillImageGen
-		case "music", "music_gen", "musicgeneration":
-			return doubao.SkillMusicGen
-		case "video", "video_gen", "videogeneration":
-			return doubao.SkillVideoGen
-		}
+	if m, ok := doubao.LookupSkillMeta(v); ok {
+		return m.Type
 	}
 	return 0
+}
+
+// thinkLevelFromEffort 把 OpenAI reasoning_effort 映射为上游档位。
+func thinkLevelFromEffort(v string, fallback int) int {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "none", "minimal", "low", "0", "fast":
+		return doubao.ThinkOff
+	case "medium", "auto", "default", "1", "think":
+		return doubao.ThinkOn
+	case "high", "xhigh", "max", "3", "expert":
+		return doubao.ThinkExpert
+	}
+	return fallback
 }
 
 // estimateUsage 给出粗略的用量估算（豆包不返回 token 数）。

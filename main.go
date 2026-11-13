@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -74,8 +75,17 @@ func main() {
 	}
 
 	srv := server.New(st)
+	// 积分自动签到 / 自动领取（默认关闭，控制台设置开启）。
+	autoCtx, stopAuto := context.WithCancel(context.Background())
+	defer stopAuto()
+	srv.StartAutoRewards(autoCtx)
 
 	addr := net.JoinHostPort(*host, fmt.Sprintf("%d", *port))
+	// 启动时就把「对外监听 + 无密钥」这类组合点名，避免误暴露后才被发现。
+	if !st.HasKeys() && !st.Settings().AllowAnonymous && !isLoopbackBind(*host) {
+		log.Printf("警告: 未签发 API 密钥却监听在非本机地址 %s，/v1/* 将拒绝所有非本机请求；"+
+			"请先在控制台创建密钥，或在设置中开启 allow_anonymous", *host)
+	}
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv.Handler(),
@@ -85,16 +95,7 @@ func main() {
 
 	go func() {
 		log.Printf("Doubao2API %s 已启动: http://%s/", version, addr)
-		if st.HasKeys() {
-			log.Printf("已签发 API 密钥，调用需携带 Authorization: Bearer sk-...")
-		} else {
-			log.Printf("尚未签发 API 密钥，当前允许无密钥调用（控制台可创建）")
-		}
-		if st.Settings().AdminPassword != "" {
-			log.Printf("管理接口已启用密码校验（X-Admin-Password / Bearer）")
-		} else {
-			log.Printf("未设置管理密码，管理接口仅允许本机访问（可用 -admin-password 设置）")
-		}
+		logSecurityMode(st)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("监听失败: %v", err)
 		}
@@ -105,6 +106,7 @@ func main() {
 	<-stop
 
 	log.Printf("正在关闭…")
+	stopAuto()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(ctx); err != nil {
@@ -114,6 +116,23 @@ func main() {
 		log.Printf("保存状态失败: %v", err)
 	}
 	log.Printf("已退出")
+}
+
+// logSecurityMode 在启动时打印密钥 / 管理接口的实际生效状态。
+func logSecurityMode(st *store.Store) {
+	switch {
+	case st.HasKeys():
+		log.Printf("已签发 API 密钥，调用需携带 Authorization: Bearer sk-...")
+	case st.Settings().AllowAnonymous:
+		log.Printf("尚未签发 API 密钥，已开启匿名调用（allow_anonymous）")
+	default:
+		log.Printf("尚未签发 API 密钥，当前仅允许本机无密钥调用（控制台可创建）")
+	}
+	if st.Settings().AdminPassword != "" {
+		log.Printf("管理接口已启用密码校验（X-Admin-Password / Bearer）")
+	} else {
+		log.Printf("未设置管理密码，管理接口仅允许本机访问（可用 -admin-password 设置）")
+	}
 }
 
 // autoImport 在启动时尝试导入本机桌面端登录态（全部 profile）。
@@ -179,6 +198,21 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// isLoopbackBind 判断监听地址是否仅限本机。
+//
+// 空串、localhost、环回 IP 视为仅本机；0.0.0.0 / :: / 具体网卡地址返回 false。
+func isLoopbackBind(host string) bool {
+	h := strings.TrimSpace(strings.ToLower(host))
+	switch h {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func envInt(key string, def int) int {

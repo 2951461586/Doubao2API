@@ -50,6 +50,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/images/generations", s.withAuth(s.handleImageGenerations))
 	mux.HandleFunc("/v1/videos/generations", s.withAuth(s.handleVideoGenerations))
 	mux.HandleFunc("/v1/music/audio", s.withAuth(s.handleMusicAudio))
+	mux.HandleFunc("/v1/music/lyrics", s.withAuth(s.handleMusicLyrics))
+	mux.HandleFunc("/v1/skills", s.withAuth(s.handleSkills))
+	mux.HandleFunc("/v1/capabilities", s.withAuth(s.handleCapabilities))
+	mux.HandleFunc("/v1/conversations", s.withAuth(s.handleConversations))
+	mux.HandleFunc("/v1/conversations/", s.withAuth(s.handleConversations))
+
+	// 积分 / 签到 / 激励任务
+	mux.HandleFunc("/v1/credits", s.withAuth(s.handleCredits))
+	mux.HandleFunc("/v1/credits/history", s.withAuth(s.handleCreditHistory))
+	mux.HandleFunc("/v1/checkin", s.withAuth(s.handleCheckin))
+	mux.HandleFunc("/v1/tasks", s.withAuth(s.handleTasks))
+	mux.HandleFunc("/v1/tasks/claim", s.withAuth(s.handleTaskClaim))
+	mux.HandleFunc("/v1/tasks/claim-completed", s.withAuth(s.handleTaskClaimCompleted))
+	mux.HandleFunc("/v1/tasks/run", s.withAuth(s.handleTaskRun))
 
 	// 控制台 API（统一走管理鉴权 + 同源校验）
 	mux.HandleFunc("/admin/api/state", s.withAdminAuth(s.handleAdminState))
@@ -147,24 +161,36 @@ func isLoopbackHost(host string) bool {
 
 // withAuth 校验 Bearer 密钥。
 //
-// 未签发任何密钥时，允许无密钥访问（首次使用的便利）；
+// 未签发任何密钥时进入「无密钥模式」：仅放行本机环回请求
+// （首次使用的便利），除非显式开启 allow_anonymous。
 // 一旦签发了密钥，则强制校验。
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.Store.HasKeys() {
-			next(w, r)
+			if s.Store.Settings().AllowAnonymous || isLoopbackAddr(r.RemoteAddr) {
+				next(w, r)
+				return
+			}
+			writeErr(w, http.StatusForbidden,
+				"尚未签发 API 密钥，非本机请求已拒绝；请在控制台创建密钥，"+
+					"或在设置中显式开启 allow_anonymous", "invalid_request_error")
 			return
 		}
 		key := extractKey(r)
+		if key != "" && s.Store.ValidKey(key) {
+			next(w, r)
+			return
+		}
+		// 控制台便利：已设置管理密码时，允许用管理密码访问 /v1/*。
+		if pw := s.Store.Settings().AdminPassword; pw != "" && secureEqual(adminPasswordFrom(r), pw) {
+			next(w, r)
+			return
+		}
 		if key == "" {
 			writeErr(w, http.StatusUnauthorized, "缺少 API 密钥", "invalid_request_error")
 			return
 		}
-		if !s.Store.ValidKey(key) {
-			writeErr(w, http.StatusUnauthorized, "API 密钥无效或已停用", "invalid_request_error")
-			return
-		}
-		next(w, r)
+		writeErr(w, http.StatusUnauthorized, "API 密钥无效或已停用", "invalid_request_error")
 	}
 }
 
@@ -265,6 +291,11 @@ func sanitizedSettings(st store.Settings) map[string]any {
 		"log_keep":            st.LogKeep,
 		"cors_origin":         st.CORSOrigin,
 		"admin_password_set":  st.AdminPassword != "",
+		"auto_checkin":        st.AutoCheckin,
+		"auto_claim_tasks":    st.AutoClaimTasks,
+		"auto_do_tasks":       st.AutoDoTasks,
+		"auto_task_limit":     st.AutoTaskLimit,
+		"allow_anonymous":     st.AllowAnonymous,
 	}
 }
 
@@ -323,6 +354,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			"doubao": map[string]any{
 				"name":        m.Name,
 				"think_level": m.ThinkLevel,
+				"skill":       m.Skill,
 				"context":     m.Context,
 				"description": m.Desc,
 			},
@@ -353,6 +385,11 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			"status": a.Status, "note": a.Note, "last_err": a.LastErr,
 			"failures": a.Failures, "last_used": a.LastUsed,
 			"device_id": a.DeviceID, "cookie_count": len(a.Cookies),
+			"iid": a.IID, "channel": a.ChannelValue(),
+			"app_version": a.PCVersionValue(), "web_tab_id": a.WebTabID,
+			"last_checkin_date": a.LastCheckinDate, "last_checkin_at": a.LastCheckinAt,
+			"last_checkin_reward": a.LastCheckinReward,
+			"last_task_date":      a.LastTaskDate, "last_task_count": a.LastTaskCount,
 		})
 	}
 	keys := s.Store.Keys()
@@ -378,11 +415,16 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Action  string `json:"action"`
-		ID      string `json:"id"`
-		Dir     string `json:"dir"`
-		Cookies string `json:"cookies"`
-		Name    string `json:"name"`
+		Action   string `json:"action"`
+		ID       string `json:"id"`
+		Dir      string `json:"dir"`
+		Cookies  string `json:"cookies"`
+		Name     string `json:"name"`
+		DeviceID string `json:"device_id"`
+		WebID    string `json:"web_id"`
+		IID      string `json:"iid"`
+		AppID    string `json:"app_id"`
+		Channel  string `json:"channel"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败", "invalid_request_error")
@@ -414,6 +456,23 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		acct.Source = "manual"
+		// 可选：用真实设备指纹覆盖随机占位值（推荐，降低风控概率）。
+		if body.DeviceID != "" {
+			acct.DeviceID = body.DeviceID
+			acct.FP = "verify_" + body.DeviceID
+		}
+		if body.WebID != "" {
+			acct.WebID = body.WebID
+		}
+		if body.IID != "" {
+			acct.IID = body.IID
+		}
+		if body.AppID != "" {
+			acct.AppID = body.AppID
+		}
+		if body.Channel != "" {
+			acct.Channel = body.Channel
+		}
 		isNew := s.Store.UpsertAccount(acct)
 		_ = s.Store.Save()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "new": isNew, "id": acct.ID})
@@ -507,6 +566,11 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		LogKeep        *int              `json:"log_keep"`
 		CORSOrigin     *string           `json:"cors_origin"`
 		AdminPassword  *string           `json:"admin_password"`
+		AutoCheckin    *bool             `json:"auto_checkin"`
+		AutoClaimTasks *bool             `json:"auto_claim_tasks"`
+		AutoDoTasks    *bool             `json:"auto_do_tasks"`
+		AutoTaskLimit  *int              `json:"auto_task_limit"`
+		AllowAnonymous *bool             `json:"allow_anonymous"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败", "invalid_request_error")
@@ -531,8 +595,24 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		if body.AdminPassword != nil {
 			st.AdminPassword = strings.TrimSpace(*body.AdminPassword)
 		}
+		if body.AutoCheckin != nil {
+			st.AutoCheckin = *body.AutoCheckin
+		}
+		if body.AutoClaimTasks != nil {
+			st.AutoClaimTasks = *body.AutoClaimTasks
+		}
+		if body.AutoDoTasks != nil {
+			st.AutoDoTasks = *body.AutoDoTasks
+		}
+		if body.AutoTaskLimit != nil {
+			st.AutoTaskLimit = *body.AutoTaskLimit
+		}
+		if body.AllowAnonymous != nil {
+			st.AllowAnonymous = *body.AllowAnonymous
+		}
 	})
 	_ = s.Store.Save()
+	s.TriggerAutoRewards()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "settings": sanitizedSettings(s.Store.Settings())})
 }
 
