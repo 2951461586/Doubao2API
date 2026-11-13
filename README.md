@@ -23,7 +23,7 @@
 ## 一、逆向结论：链路很短，但凭据加密有两层
 
 DoubaoWork 是**基于 Lark/飞书内核的 Chromium 原生应用**（不是 Electron）：
-主逻辑打包在 `local_webcontents/biz/biz.pak`（224 MB 自定义包），
+主逻辑打包在 `local_webcontents/biz/biz.pak`（147 版本约 195 MB，旧版 224 MB 自定义包），
 AI 能力由内部代号 **`samantha`** 的服务提供，账号资料走 **`alice`**。
 
 推理入口本身是一个标准的 SSE 接口，**不需要伪造签名、不需要设备指纹算法、
@@ -34,8 +34,9 @@ AI 能力由内部代号 **`samantha`** 的服务提供，账号资料走 **`ali
 | 应用形态 | Chromium 原生应用（Lark 内核），`biz.pak` = 12 字节头 + 6 字节索引 + N 个 blob |
 | 业务代号 | `samantha`（AI 会话）、`alice`（账号 / 资料） |
 | **推理入口** | `POST https://www.doubao.com/chat/completion` |
-| **鉴权** | Cookie（`sessionid` / `sid_guard` / `ttwid` / `odin_tt`）+ 头 `x-tt-passport-csrf-token` |
-| 公参 | `aid=582478`、`device_platform=web`、`version_code=20800`、`fp`、`web_id`、`web_tab_id` |
+| **鉴权** | Cookie（`sessionid` / `sid_guard` / `ttwid` / `odin_tt`）+ 头 `x-tt-passport-csrf-token`（可经 `/passport/safe/csrf_token/` 刷新）+ `Agw-Js-Conv: str` |
+| 公参 | `aid=1044603`、`device_platform=web`、`doubao_device_platform=desktop`、`pc_version=2.36.15`、`runtime_version=3.45.5`、`channel=win`、`fp=verify_<device_id>`、`iid`、`web_id`、`web_tab_id` |
+| 客户端版本 | DoubaoWork `147.0.7727.149` / 应用 `2.36.15` / 前端包 `3.45.5` / `VERSION_CODE=20800` |
 | 请求体 | `client_meta` + `messages[].content_block` + `option` + `ext`（JSON 明文） |
 | 响应 | SSE：`SSE_ACK` → `STREAM_MSG_NOTIFY` → `STREAM_CHUNK` / `CHUNK_DELTA` → `SSE_REPLY_END` |
 | 凭据落盘 | `<User Data>\<profile>\Network\Cookies`（**SQLite**） |
@@ -45,18 +46,28 @@ AI 能力由内部代号 **`samantha`** 的服务提供，账号资料走 **`ali
 ### 1.1 `biz.pak` 包格式与还原流程
 
 ```text
-header : version(u32 LE) | reserved(u32) | count(u32)
-index  : count × { id(u16 LE) | offset(u32 LE) }   // 按 offset 升序
-data   : 第 i 个 blob = [offset_i, offset_{i+1})，多为 gzip
+header : version(u32 LE) | reserved(u32) | field2(u32)
+index  : N × { id(u16 LE) | offset(u32 LE) }   // 按 offset 升序
+v5     : index 以 { id=0, offset=文件长度 } 哨兵结束，后面还有约 3 KB 元数据
+         才到第一个 blob；field2 不再是条目数
+data   : 第 i 个 blob = [offset_i, offset_{i+1})
 ```
 
-本机实测 `count = 10368`。还原分两步（均可随时重跑）：
+本机实测（147.0.7727.149）：`version=5`、9810 个 blob、源包 195 MB、解压后 525 MB。
+`tools/extract_pak.py` 已兼容新旧两种布局：旧版信任 header 的条目数，v5 用
+「哨兵 / 首个 offset」推断 index 长度。
+
+> **注意**：当前 147 构建**不再随包携带 source map**（还原脚本统计为 0 份）。
+> 因此本项目的协议结论来自：上一版还原出的 3010 个 TS 源文件、当前 bundle 中
+> 未被混淆的枚举 / 端点 / 请求体字符串，以及对上游的实测探针。
+
+还原分两步（均可随时重跑）：
 
 ```bash
-# 1) 拆包：把 pak 拆成一堆 blob（约 580 MB，产物勿入库）
+# 1) 拆包：把 pak 拆成一堆 blob（产物勿入库）
 python tools/extract_pak.py "F:\IDE\DoubaoWork\app\local_webcontents\biz\biz.pak" .recon/extract
 
-# 2) 还原源码：解出 35 份 source map 的 sourcesContent，按原目录结构落盘
+# 2) 还原源码：解出 source map 的 sourcesContent，按原目录结构落盘
 python tools/extract_sources.py .recon/extract .recon/src --stats
 ```
 
@@ -73,14 +84,14 @@ python tools/extract_sources.py .recon/extract .recon/src --stats
 
 | 事实 | 位置 |
 | --- | --- |
-| 上游入口与请求头 | `static/js/*.js`：`/samantha/chat/completion`、`Agw-Js-Conv: str` |
-| 请求体构造 | `L1-Arch/business/api/src/flow-api.ts` 及各 `api/*/index.ts` |
-| 公参定义 | `src/init/params/index.ts`：`aid` / `device_id` / `web_id` / `version_code` |
-| 应用常量 | `Infra/constants/src/index.ts`：`VERSION_CODE=20800`、`DESKTOP_DOUBAO_WORK_APP_ID=1044603` |
-| 内容块枚举 | `block_type`：`10000` 文本、`10040` 思考、`10024` 工具、`10025` 联网搜索、`10052` 附件、`2074` 生成结果 |
-| 技能枚举 | `SkillType`：`3` 图像、`9` 音乐、`17` 视频（即 `option.action_bar_skill_id`） |
-| 画布操作枚举 | `canvas_type`：`GenImage=10`、`GenVideo=50`（创意画布执行接口） |
-| 消息内容类型 | `content_type`：`70` 音乐成品、`71` 歌词、`2021` 视频生成、`2074` 生成结果 |
+| 上游入口与请求头 | `/samantha/chat/completion`、`Agw-Js-Conv: str`、`tz_name` |
+| 请求体构造 | `L1-Arch/business/api/src/api/samantha_api`、`im-sdk/protocol`（`content_block`） |
+| 公参定义 | `src/init/params/index.ts` + `get-common-params`：`aid=1044603`、`doubao_device_platform=desktop`、`fp=verify_<device_id>` |
+| 应用常量 | `PROJECT_VERSION=3.45.5`、`VERSION_CODE=20800`、`DESKTOP_DOUBAO_WORK_APP_ID=1044603` |
+| CSRF 刷新 | `GET /passport/safe/csrf_token/`（必须去掉 `real_aid`） |
+| 内容块枚举 | `10000` 文本、`10040` 思考、`10024` 工具、`10025` 联网搜索、`10052` 附件、`2074` 生成结果；另见 6.2 的完整扩展表 |
+| 技能枚举 | `0` Coding、`2` 写作、`3` 图像、`4` 搜索、`5` 翻译、`6` 阅读、`9` 音乐、`17` 视频、`18` PPT …… |
+| 消息内容类型 | `70` 音乐成品、`71` 歌词、`72` 多首成品、`2021` 视频、`2022` 多产物、`2073` 搜索引擎 |
 
 ### 1.3 与参考项目 AStudio2API 的对照
 
@@ -106,11 +117,37 @@ python tools/extract_sources.py .recon/extract .recon/src --stats
 | `doubao-think` | 1（思考） | 128K | 返回思维链 → `reasoning_content` |
 | `doubao-expert` | 3（专家） | 256K | 深度推理，适合复杂任务 |
 
-内置别名：`doubao-pro` / `doubao-lite` / `doubao-fast` / `gpt-3.5-turbo` / `gpt-4o` → `doubao`；
-`doubao-reason` / `doubao-thinking` / `gpt-4` → `doubao-think`；
+内置别名：`doubao-pro` / `doubao-lite` / `doubao-fast` / `gpt-3.5-turbo` / `gpt-4o` / `gpt-4o-mini` / `gemini-pro` → `doubao`；
+`doubao-reason` / `doubao-thinking` / `gpt-4` / `claude-3-5-sonnet` → `doubao-think`；
 `doubao-max` / `doubao-deep` → `doubao-expert`。
 
 还可在控制台「设置 → 模型别名」自定义，格式 `别名=目标`。
+
+### 2.1 技能模型（选中即自动带 `action_bar_skill_id`）
+
+| 模型 ID | 技能 | 说明 |
+| --- | ---: | --- |
+| `doubao-draw` | 3 | 图像生成（Seedream） |
+| `doubao-search` | 4 | AI 搜索（联网） |
+| `doubao-write` | 2 | 创意写作 |
+| `doubao-translate` | 5 | 翻译 |
+| `doubao-read` | 6 | PDF / 文档阅读 |
+| `doubao-code` | 0 | Coding |
+| `doubao-data` | 13 | 代码解释器 / 数据分析 |
+| `doubao-deep-search` | 8 | 多轮深度检索 |
+| `doubao-research` | 15 | 深度研究报告 |
+| `doubao-ppt` | 18 | AI PPT |
+| `doubao-music` | 9 | 音乐生成（需配额） |
+| `doubao-video` | 17 | 视频生成（需配额） |
+
+技能模型会自动套用上游 `default_prompt`（如 `生成一张图片:${style} ${content}`），
+提示词里已带模板前缀时不会重复包裹。完整技能清单见 `GET /v1/skills`。
+
+### 2.2 推理强度
+
+聊天接口接受 OpenAI 的 `reasoning_effort`，映射到上游 `need_deep_think`：
+`none/minimal/low` → 0（快速），`medium/auto/default` → 1（思考），
+`high/xhigh/max` → 3（专家）。显式传 `skill` / 技能模型时，技能优先级更高。
 
 > 无法识别的模型名会**回落到 `doubao`**，而不是报错——这样任何客户端都能开箱即用。
 
@@ -211,6 +248,10 @@ docker run -d --name doubao2api --restart unless-stopped \
 
     > 若设置了 `DOUBAO_ADMIN_PASSWORD`，管理接口必须带 `X-Admin-Password` 头；
     > 未设置时容器内只能从回环访问，故请通过环境变量设置。
+    >
+    > 可选字段：`device_id` / `web_id` / `iid` / `app_id` / `channel`。填写真实的
+    > `device_id` 后网关会自动把 `fp` 设为 `verify_<device_id>`（与桌面端一致）；
+    > 默认 `app_id=1044603`（DoubaoWork），主端 Web Cookie 可显式传 `app_id=582478`。
 
 3. 验证连通性：
 
@@ -235,16 +276,35 @@ docker run -d --name doubao2api --restart unless-stopped \
 | `/v1/messages` | POST | Anthropic Messages，流式 / 非流式 |
 | `/v1/images/generations` | POST | OpenAI Images，文生图（返回 `url` / `b64_json`） |
 | `/v1/videos/generations` | POST | 文生视频（返回 `url` / `vid` / 时长 / 分辨率） |
+| `/v1/music/lyrics` | POST | 生成歌词（`prompt` / `genre` / `mood`） |
 | `/v1/music/audio` | POST | 用音乐消息的 `video_id` 换取音频地址 |
-| `/v1/models` | GET | 模型清单（含 `doubao.think_level` 等扩展字段） |
+| `/v1/skills` | GET | 上游技能清单（含默认提示词 / 别名 / 对应模型） |
+| `/v1/conversations` | GET | 会话列表（`limit` / `offset` / `types`） |
+| `/v1/conversations/{id}` | PATCH / DELETE | 重命名 / 归档；`POST .../pin|unpin|archive|clear` |
+| `/v1/credits` | GET | 积分余额 + 每日登录任务（`?tasks=false` 可省略任务） |
+| `/v1/credits/history` | GET | 积分流水（`size` / `cursor` / `type`） |
+| `/v1/checkin` | POST | 每日签到（按天幂等，返回奖励额度） |
+| `/v1/tasks` | GET | 积分任务 / 里程碑（默认 `pc_incentive_task_mvp_v3`） |
+| `/v1/tasks/claim` | POST | 领取单个任务奖励 |
+| `/v1/tasks/claim-completed` | POST | 自动领取「已完成 / 直接领取」的任务奖励 |
+| `/v1/tasks/run` | POST | 自动尝试执行任务（推荐提示词 + WorkTask 模式）并清理会话 |
+| `/v1/capabilities` | GET | 模型 / 技能 / 端点自发现 |
+| `/v1/models` | GET | 模型清单（含 `doubao.think_level` / `doubao.skill` 扩展字段） |
 
 鉴权：`Authorization: Bearer <sk-...>` 或 `x-api-key`。
-**未签发任何密钥时允许无密钥调用**（首次使用的便利）；一旦在控制台创建密钥即强制校验。
+**未签发任何密钥时只允许本机无密钥调用**（首次使用的便利）：非环回来源会被拒绝，
+除非在设置里显式开启 `allow_anonymous`；一旦在控制台创建密钥即强制校验。
 
-> **扩展字段**：聊天接口支持 `skill`（技能透传），可取 `image` / `music` / `video`
-> 或直接传数值（3 / 9 / 17），对应上游 `option.action_bar_skill_id`；
+> **扩展字段**：聊天接口支持 `skill`（技能透传），可取名称 / 别名（`image` / `search` / `write` / `music` / `video` / `ppt` …）
+> 或直接传数值（0 / 2 / 3 / 4 / 5 / 6 / 8 / 9 / 13 / 15 / 17 / 18 …），对应上游 `option.action_bar_skill_id`；
 > `input_skill` 对应上游 `ext.input_skill`（音乐技能入参）；
+> `reasoning_effort` 映射思考档位；`agent_mode` / `model_item_key` / `mode_id` / `selection_mode`
+> 透传新版客户端的模型选择参数；`selected_skills` 对应 `ext.mention_skill_list`；
+> `ext` 可整体透传上游 `ext`（高级用法）；也可写成 `{"doubao":{...}}` 命名空间形式。
 > `content` 里可放 `input_file` / `image_url` 分片（见下文「多模态」）。
+>
+> 响应侧除 `content` / `reasoning_content` 外，还会在顶层（非流式）或 `delta`（流式）返回
+> `images` / `sources` / `artifacts` / `music` 等结构化产物。
 
 #### 多轮会话
 
@@ -326,8 +386,9 @@ curl http://127.0.0.1:10086/v1/messages \
 
 ### 4.3 控制台接口
 
-浏览器直接打开 <http://127.0.0.1:10086/> 即为内置控制台单页（账号 / 密钥 / 日志 / 统计 / 设置）。
-单文件内嵌、无外部依赖，调用的就是下面这些 JSON 接口：
+浏览器直接打开 <http://127.0.0.1:10086/> 即为内置控制台单页。控制台已改为侧边栏布局，
+覆盖概览、账号池、密钥、模型与技能、积分与任务、会话、日志、设置；支持深浅色切换、
+管理密码记忆、扫码登录、签到 / 积分 / 任务操作。单文件内嵌、无外部依赖，调用的就是下面这些 JSON 接口：
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
@@ -394,7 +455,9 @@ curl http://127.0.0.1:10086/admin/api/state \
 | `-import` | — | — | 只导入一次后退出 |
 | `-no-import` | — | — | 启动时不自动导入 |
 
-控制台内还可调：模型别名、请求超时、重试次数、日志保留条数、CORS 来源。
+控制台内还可调：模型别名、请求超时、重试次数、日志保留条数、CORS 来源、
+自动签到（`auto_checkin`）、自动领取已完成任务奖励（`auto_claim_tasks`）、
+自动做任务（`auto_do_tasks`）、无密钥模式是否放行非本机（`allow_anonymous`）。
 
 ### 5.1 状态文件与脱敏
 
@@ -414,6 +477,9 @@ doubao2api-data.json      # 含账号 Cookie / API 密钥
   且**从不发送** `Access-Control-Allow-Credentials`。
 - 需局域网访问时，在设置里显式填写逗号分隔的来源；`*` 通配符不生效。
 - 默认监听 `127.0.0.1`，不暴露到局域网；需要时用 `-host 0.0.0.0` 显式放开。
+- **无密钥模式**：一个密钥都没签发时，`/v1/*` **只放行环回来源**；
+  非本机请求返回 403 并提示去控制台创建密钥。确需匿名对外时，在设置里
+  打开 `allow_anonymous`（不推荐）。启动时若「对外监听 + 无密钥」会打印警告。
 - **管理接口**：未设密码时仅本机可访问，设置后必须带 `X-Admin-Password`；
   写操作做同源校验以阻断 CSRF。对外暴露（局域网 / 反向代理）时**务必设置
   管理密码**，否则控制台将不可达（而非裸奔）。
@@ -449,12 +515,23 @@ Cookies(SQLite) ──[b-tree 遍历 → 记录解码 → AES-256-GCM]──▶ 
 | `CHUNK_DELTA` `{"text":"..."}` | 紧凑增量，按当前阶段归入正文或思维链 |
 | `block_type=10040` | 思考容器块；**第 1 个**之后的文本算思维链，**第 2 个**起算正文 |
 | `block_type=10000` | `text_block.text` 正文 |
-| `block_type=10101` / `10024` / `10025` | 加载提示 / 工具 / 联网搜索 |
+| `10101` / `10024` / `10053` | 加载提示 / 工具 / 提示 → 工具信息 |
+| `10005` / `10025` / `10050` | 联网搜索 → `sources[]`（标题 / URL / 摘要 / 站点） |
+| `10008` | 代码块 → 完成时以 Markdown 代码围栏输出一次 |
+| `10010` | 生图过程块 → `images[]` |
+| `10011` / `10013` / `10014` / `10027` | 深度研究 / 网页 / 状态 / 图片理解 → 工具信息 |
+| `10019` / `10020` / `10021` | 文件操作 / 文件 / 代码产物 |
+| `10030` / `10058` | 产物块 → `artifacts[]`（resource_id / resource_type / 标题） |
+| `10051` / `10056` | 链接 / 引用 → `sources[]` |
+| `10075` | 音乐成品 → `music[]`（video_id / 标题 / 时长） |
+| `2074` | 生成结果 → `images[]`（`creation_block.creations[]`） |
 | `patch_op[].patch_value.content` | JSON 字符串形式的新版增量 |
 | `gateway-error` | 直接上抛（如会话过期、风控） |
 
 > 踩过的坑：`option.answer_with_suggest` 置 `false` 会让上游**完全不返回思维链**，
-> 必须为 `true`（代码中已注明）。
+> 必须为 `true`（代码中已注明）；新版客户端新增的 `conversation_init_ext` /
+> `model_config` / `aggregate_params` 不能带空 `model_item_key`，否则返回
+> `710020202 common invalid param`。
 
 ### 6.3 账号池与重试
 
@@ -522,21 +599,22 @@ POST /creativity/canvas/exec
 `use_model` 留空时上游自行选择（实测落到 `seedance_v2.0`）。实测一次生成约 3 分钟，
 因此 `/v1/videos/generations` 单独把超时放宽到 15 分钟。
 
-### 6.7 文生音乐：输入结构与音频解析已还原
+### 6.7 文生音乐：歌词 / 成品 / 音频
 
+- **歌词可单发**：`POST /alice/media/bigmusic/lyrics_web`（`{prompt, genre, mood}`）或
+  `POST /alice/media/bigmusic/lyrics`（`{prompt}`）→ `data.lyrics_list`。
+  网关已封装为 `POST /v1/music/lyrics`（实测可用）。
 - **输入结构**：音乐技能的入参放在 `ext.input_skill`（JSON 字符串）：
   `{"lyric":"…","theme":"…","mood":"…","genre":"…","gender":"","generation_type":"…"}`。
-- **成品消息**：音乐以 `content_type=70`（LyricsToSongMusic）回传，其 `content_obj`
-  携带 `video_id`；歌词是 `content_type=71`（另有 `72` = 多首成品）。
+- **成品消息**：音乐以 `block_type=10075`（`lyrics_to_songs_music_block`）回传，
+  其 `lyrics_to_songs_music_content` 携带 `video_id` / 标题 / 封面；
+  聊天响应会把它归入 `music[]`。
 - **音频地址**：客户端用 `video_id` 调 `POST /alice/media/bigmusic/get_video`
   取真实地址（桌面端渲染器的 `fetchMusicAudioUrl`），**实测该接口可用**，
   返回带签名的 `video/tos/...` 地址。
-- **歌词可单发**：`POST /alice/media/bigmusic/lyrics`（`{prompt}`，或
-  `{prompt, genre, mood}` 走 `lyrics_web`）→ `data.lyrics_list`。
-- **未闭环的部分**：`skill=9` 的聊天请求在这三个账号上**固定**返回
-  `710022004 rate limited`（`shark_admin` 配额/风控），因此拿不到真实的
-  `content_type=70` 样本。网关已实现 `input_skill` 透传与
-  `/v1/music/audio`（`video_id` → 音频地址），有配额的账号可自行闭环。
+- **未闭环的部分**：`skill=9` 的聊天请求在当前账号上仍可能返回
+  `710022004 rate limited`（`shark_admin` 配额/风控）；有配额的账号可直接把
+  聊天流里的 `music[].video_id` 交给 `/v1/music/audio` 闭环。
 
 ### 6.8 扫码登录
 
@@ -549,6 +627,101 @@ POST /passport/web/check_qrconnect/?aid=582478&next=…   → status: new / scan
 
 会话（含 Cookie jar）保存在内存，确认后跟随跳转拿 `sessionid` 等 Cookie 并入库。
 
+### 6.9 请求头、公参与 CSRF 刷新
+
+聊天接口实际发送的关键头（与桌面端 3.45.5 对齐）：
+
+```text
+Content-Type: application/json
+Accept: text/event-stream
+User-Agent: Mozilla/5.0 … Chrome/147.0.7727.149 Safari/537.36 SamanthaDoubaoWork/2.36.15
+Origin / Referer: https://www.doubao.com
+Accept-Language: zh-CN,zh;q=0.9
+Agw-Js-Conv: str                 # int64 → 字符串，避免 conversation_id 丢精度
+x-tt-passport-csrf-token: <token>
+Cookie: <导入的 Cookie>
+```
+
+公参关键值：`aid=1044603`、`real_aid=1044603`、`device_platform=web`、
+`doubao_device_platform=desktop`、`web_platform=desktop`、`pkg_type=release_version`、
+`version_code=20800`、`pc_version/doubao_pc_version=2.36.15`、`runtime_version=3.45.5`、
+`chromium_version=147.0.7727.149`、`client_platform=pc_client`、`channel=win`、
+`fp=verify_<device_id>`、`iid`、`web_id`、`tea_uuid`、`web_tab_id`、`tz_name`（聊天）。
+
+CSRF token 的自动刷新：
+
+```text
+GET /passport/safe/csrf_token/?aid=…&device_id=…
+  → {"data":{"passport_csrf_token":"…"},"message":"success"}
+```
+
+> 这个接口**必须去掉 `real_aid`**（带上会返回 `error_code=22 非法应用`）。
+> 网关缓存 token 30 分钟；缺失时预刷新，聊天被登录 / CSRF 类错误拒绝且
+> 尚未输出内容时强制刷新并重试一次。
+
+### 6.10 新版客户端参数与「技能模型」
+
+- 公参新增 `doubao_device_platform` / `web_platform` / `channel` / `iid` / `doubao_pc_version`；
+  `device_platform` 仍兼容为 `web`。
+- `fp` 固定为 `verify_<device_id>`（不再是随机串）；`web_tab_id` 每账号固定。
+- `option` 新增 `agent_mode` / `is_from_click_option` 等；
+  模型选择走 `conversation_init_ext` / `model_config` / `aggregate_params`（不传空键）。
+  > 客户端默认开启的 `support_lazy_fetch_stream` 需要配套的惰性拉流实现，
+  > 网关暂不开启，避免长回复 / 产物场景丢包。
+- `GET /v1/skills` 拉取 `/samantha/skill/list`，并给出技能 → 模型映射；
+  技能模型在发送前自动套用 `default_prompt`。
+- `GET /v1/conversations` → `/alice/conversation/list`；
+  `PATCH/DELETE/POST .../pin|unpin|archive|clear` → `/alice/conversation/*`。
+
+### 6.11 积分、签到与任务奖励
+
+豆包有「积分（credits）」和「额度（quota）」两个概念：
+
+- `GET /v1/credits`：调用 `/commerce/benefit_supply/credit/get_credit_num_optional_tasks`，
+  返回 `credit.total_credit_num`、每日登录任务与积分规则链接。
+- `POST /v1/checkin`：调用 `/alice/ug/campaign/landing/checkin`，按天幂等；
+  实测返回 `reward_type=quota_grant`、`reward_amount=200`、`continuous_days`、
+  `checkin_date`、`idempotent`。
+- `GET /v1/tasks`：调用 `/alice/ug/campaign/v3/detail/`，默认活动组为
+  `pc_incentive_task_mvp_v3`；返回任务 / 里程碑、状态、奖励（`quota_grant`）与进度。
+- `POST /v1/tasks/claim`：调用 `/alice/ug/campaign/item/reward/claim/`，
+  参数 `task_id` / `campaign_group_code` / `campaign_item_code`。
+- `POST /v1/tasks/claim-completed`：先读任务详情，只领取 `task_status=completed`
+  或 `reward_mode=direct_claim` 且未领取的奖励；**不会伪造任务完成行为**。
+
+任务状态：`1=created`、`2=completed`、`3=rewarded`、`4=in_progress`；
+领取模式：`1=complete_then_claim`、`2=direct_claim`。
+
+自动执行（默认关闭）：
+
+```bash
+# 开启后台自动签到 + 自动领取 + 自动尝试做任务
+curl -X POST http://127.0.0.1:10086/admin/api/settings -H 'Content-Type: application/json' -d '{"auto_checkin":true,"auto_claim_tasks":true,"auto_do_tasks":true,"auto_task_limit":3}'
+```
+
+后台每 30 分钟检查一次：
+
+| 设置 | 行为 |
+| --- | --- |
+| `auto_checkin` | 每天每账号签到一次（按 `last_checkin_date` 去重） |
+| `auto_claim_tasks` | 只领取 `completed` / `direct_claim` 且尚未领取的奖励 |
+| `auto_do_tasks` | 每天每账号最多尝试 `auto_task_limit` 个任务 |
+
+自动做任务的流程（`/v1/tasks/run` 与后台一致）：
+
+1. `POST /alice/ug/event/report`（`scene=campaign_task_click`）创建任务实例；
+2. 取任务 `recommend_prompts` 的 `prompt`，以 `agent_mode=4`（WorkTask）发送对话；
+3. 轮询 `/alice/ug/campaign/v3/detail/` 直到 `completed` / `rewarded`；
+4. 领取奖励；
+5. 清空并归档本次会话，清理 `doubao2api-*` 临时文件（1 小时前）。
+
+> 上游部分任务依赖客户端专用 WorkTask 技能（`lark-doc` / `lark-sheets` /
+> `Lark-sLides-pro` / `schedule`）。网关会尝试发送推荐提示词并如实返回
+> `claimed` / `not_completed` / `skipped` / `failed`，**不会伪造任务完成**。
+> 当前账号实测：自动签到与领取可用；任务尝试可能因上游技能链返回 `not_completed`。
+> `skill_use`、`work_buddy_add_chat`、`enable_notification` 等需要真实产品动作的任务
+> 不在自动执行范围内。
+
 ---
 
 ## 七、项目结构
@@ -558,28 +731,34 @@ doubao2api/
 ├── main.go                        # 入口：配置、启动、自动导入、优雅关闭
 ├── internal/
 │   ├── doubao/
-│   │   ├── types.go               # 账号 / 内容块枚举 / 档位常量 / 图片附件
-│   │   ├── util.go                # UUID、指纹、Cookie 串解析
+│   │   ├── types.go               # 账号 / 内容块枚举 / 技能枚举 / 档位常量 / 附件
+│   │   ├── util.go                # UUID、指纹、Cookie 串解析、Local Storage 正则
 │   │   ├── sqlite.go              # 极简 SQLite 只读解析器（零依赖）
 │   │   ├── cookie_windows.go      # DPAPI + AES-GCM + 域名前缀剥离 + 多 profile 导入
 │   │   ├── cookie_other.go        # 非 Windows 平台占位
+│   │   ├── csrf.go                # CSRF token 刷新与 30 分钟缓存
 │   │   ├── sse.go                 # SSE 事件流解析
+│   │   ├── blocks.go              # 新块类型解析（搜索 / 代码 / 产物 / 音乐 / 来源）
+│   │   ├── skills.go              # 技能元数据 + /samantha/skill/list + postJSON
+│   │   ├── rewards.go             # 积分 / 签到 / 激励任务（credit、checkin、campaign）
+│   │   ├── endpoints.go           # 会话 / 歌词等 JSON 端点
 │   │   ├── upload.go              # 图片转存：prepare_upload + imageX 直传（SigV4）
 │   │   ├── video.go               # 文生视频：创意画布 exec + 幂等轮询
 │   │   ├── music.go               # 音乐：input_skill 结构 + get_video 音频解析
-│   │   └── client.go              # 上游客户端：公参、请求体、补丁流解析
-│   ├── store/store.go             # 状态持久化、账号池、密钥、统计、日志
-│   ├── registry/registry.go       # 模型清单与别名解析
+│   │   └── client.go              # 上游客户端：公参、请求头、请求体、补丁流解析
+│   ├── store/store.go             # 状态持久化、账号池、密钥、统计、日志、旧指纹迁移
+│   ├── registry/registry.go       # 模型清单（含技能模型）与别名解析
 │   └── server/
 │       ├── server.go              # 路由、鉴权、CORS、控制台 API
 │       ├── chat.go                # /v1/chat/completions、多轮、重试、附件转存
+│       ├── extras.go              # /v1/skills、/v1/conversations、/v1/credits、/v1/checkin、/v1/tasks（含 run）、/v1/capabilities
 │       ├── anthropic.go           # /v1/messages 双向转换
 │       ├── images.go              # /v1/images/generations（文生图技能）
 │       ├── videos.go              # /v1/videos/generations（创意画布 GenVideo）
 │       ├── music.go               # /v1/music/audio（video_id → 音频地址）
 │       ├── login.go               # 扫码登录（passport SSO）
 │       ├── web.go                 # 控制台单页的内嵌与响应头
-│       └── web/index.html         # 控制台单页（单文件，无外部依赖）
+│       └── web/index.html         # 控制台单页（侧边栏 + 深浅色，覆盖全部后端模块）
 ├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
 ├── tools/extract_pak.py           # biz.pak 解包脚本（第一步，可重跑）
 ├── tools/extract_sources.py       # source map → 源码还原脚本（第二步，可重跑）
@@ -593,7 +772,29 @@ doubao2api/
 
 ## 八、当前进度与后续
 
-### 已完成（第一阶段：精简网关）
+### 已完成（第二阶段：协议对齐 + 能力扩充）
+
+- [x] `biz.pak` v5 格式兼容（哨兵结束 / field2 非条目数），拆包脚本可重跑
+- [x] 公参 / 请求头对齐 147 客户端：`aid=1044603`、`doubao_device_platform`、
+      `pc_version=2.36.15`、`runtime_version=3.45.5`、`channel=win`、
+      `fp=verify_<device_id>`、`iid`、`Agw-Js-Conv: str`、`tz_name`
+- [x] CSRF token 自动刷新（`/passport/safe/csrf_token/`，去掉 `real_aid`）+ 30 分钟缓存 + 鉴权失败重试
+- [x] 旧账号指纹自动迁移（随机 `fp` → `verify_<device_id>`，补齐 `web_tab_id`）
+- [x] 新块类型解析：搜索来源 / 代码 / 生图 / 产物 / 链接引用 / 音乐成品
+- [x] 结构化输出：`sources[]` / `artifacts[]` / `music[]` / `images[]`
+- [x] 技能清单与技能模型（13 个技能模型，自动套用 `default_prompt`）
+- [x] `reasoning_effort` → `need_deep_think` 映射
+- [x] `agent_mode` / `model_item_key` / `mode_id` / `selection_mode` / `selected_skills` / `ext` 透传
+- [x] `/v1/skills`、`/v1/conversations`（列表 / 重命名 / 归档 / 置顶 / 清空）、`/v1/capabilities`
+- [x] `/v1/music/lyrics`（lyrics_web / lyrics，实测可用）
+- [x] 积分 / 签到 / 任务奖励：`/v1/credits`、`/v1/checkin`、`/v1/tasks`、
+      `/v1/tasks/claim`、`/v1/tasks/claim-completed`
+- [x] 每日自动签到 / 自动领取已完成奖励（`auto_checkin` / `auto_claim_tasks`，默认关闭）
+- [x] 自动尝试做任务（`auto_do_tasks` / `auto_task_limit`）+ 会话清空归档 + 临时文件清理
+- [x] 控制台全面改版：侧边栏、深浅色、概览 / 账号 / 密钥 / 模型与技能 /
+      积分与任务 / 会话 / 日志 / 设置，覆盖全部后端模块
+
+### 第一阶段（精简网关）
 
 - [x] 桌面端凭据自动导入（DPAPI + AES-GCM + 域名前缀），支持多 profile 批量导入
 - [x] 上游协议复刻（公参、请求体、SSE 补丁流）
@@ -615,9 +816,12 @@ doubao2api/
 
 ### 后续阶段
 
-- [ ] 文生音乐成品：输入结构（`ext.input_skill`）与成品消息（`content_type=70`）
-      均已还原，但上游对音乐技能固定 `710022004 rate limited`，
-      当前账号无配额，拿不到真实成品样本（见 6.7）
+- [ ] 文生音乐成品：`skill=9` 的聊天请求仍受账号配额 / 风控限制；
+      歌词（`/v1/music/lyrics`）与成品解析（`music[]` / `/v1/music/audio`）已闭环，
+      有配额的账号可直接出成品
+- [ ] 异步长任务：`/chat/async/chunk_stream` / `/samantha/chat/async/stream`
+      （新版客户端的 async task 协议，用于智能体 / 深度研究长任务）
+- [ ] 上游二进制流：`/alice/message/stream_reply`（protobuf），当前仍走 JSON SSE
 
 ---
 
@@ -627,7 +831,7 @@ doubao2api/
   请勿公开暴露到公网或用于商业转售。
 - 凭据即账号。`doubao2api-data.json` 里的 Cookie 等同于账号密码，
   **不要提交到仓库或分享**。
-- 逆向产物 `.recon/`（`biz.pak` 解包结果 `extract/` 约 580 MB、source map
+- 逆向产物 `.recon/`（`biz.pak` 解包结果 `extract/` 约 525 MB、source map
   还原的第三方源码 `src/` 约 16 MB）体积大且含第三方版权内容，已加入 `.gitignore`，
   仅作本地协议比对；两者都可由 `tools/` 下两个脚本重新生成，不入库也不影响构建。
 - 上游可能随时调整协议或启用风控。若出现 `gateway-error`，
