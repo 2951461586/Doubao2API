@@ -31,6 +31,18 @@ type Settings struct {
 	LogKeep        int               `json:"log_keep"`
 	CORSOrigin     string            `json:"cors_origin"`
 	AdminPassword  string            `json:"admin_password"`
+	// AutoCheckin 开启后后台每天自动为每个账号签到一次。
+	AutoCheckin bool `json:"auto_checkin,omitempty"`
+	// AutoClaimTasks 开启后后台自动领取「已完成 / 直接领取」的积分任务奖励。
+	AutoClaimTasks bool `json:"auto_claim_tasks,omitempty"`
+	// AutoDoTasks 开启后后台每天尝试执行积分任务。
+	AutoDoTasks bool `json:"auto_do_tasks,omitempty"`
+	// AutoTaskLimit 是每个账号每天自动尝试的任务数上限。
+	AutoTaskLimit int `json:"auto_task_limit,omitempty"`
+	// AllowAnonymous 允许在未签发任何密钥时接受非本机请求。
+	//
+	// 默认关闭：无密钥模式仅放行环回来源，避免误绑 0.0.0.0 后裸奔。
+	AllowAnonymous bool `json:"allow_anonymous,omitempty"`
 }
 
 // LogEntry 是一条请求日志（只记元信息，不落对话内容）。
@@ -67,6 +79,7 @@ type State struct {
 // Store 是带锁的状态容器。
 type Store struct {
 	mu     sync.RWMutex
+	saveMu sync.Mutex
 	path   string
 	st     *State
 	rotate int
@@ -81,6 +94,13 @@ func DefaultSettings() Settings {
 		LogKeep:        500,
 		// 默认仅放行本机来源；如需局域网访问，在控制台显式配置。
 		CORSOrigin: "",
+		// 自动签到 / 自动领取默认关闭，避免未经确认地修改账号额度。
+		AutoCheckin:    false,
+		AutoClaimTasks: false,
+		AutoDoTasks:    false,
+		AutoTaskLimit:  3,
+		// 无密钥模式默认只放行本机；确需对外提供匿名调用时显式开启。
+		AllowAnonymous: false,
 	}
 }
 
@@ -114,6 +134,22 @@ func Open(path string) (*Store, error) {
 		if s.st.Stats.StartedAt == 0 {
 			s.st.Stats.StartedAt = time.Now().Unix()
 		}
+		// 迁移旧版本导入的指纹：客户端 1.2 起 fp 固定为 verify_<device_id>，
+		// 且 web_tab_id 每个账号固定一个。
+		for _, a := range s.st.Accounts {
+			if a == nil {
+				continue
+			}
+			if a.DeviceID != "" && a.FP != "verify_"+a.DeviceID {
+				a.FP = "verify_" + a.DeviceID
+			}
+			if a.WebTabID == "" {
+				a.WebTabID = doubao.NewUUID()
+			}
+			if a.PCVersion == "" && a.AppVersion != "" {
+				a.PCVersion = a.AppVersion
+			}
+		}
 	case errors.Is(err, os.ErrNotExist):
 		s.st.Stats.StartedAt = time.Now().Unix()
 	default:
@@ -127,6 +163,9 @@ func (s *Store) Path() string { return s.path }
 
 // Save 原子写回状态文件。
 func (s *Store) Save() error {
+	// 串行化落盘，避免自动任务与 HTTP 请求同时写同一个 .tmp 文件。
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
 	s.mu.RLock()
 	raw, err := json.MarshalIndent(s.st, "", "  ")
 	s.mu.RUnlock()
@@ -245,6 +284,44 @@ func (s *Store) MarkAccountResult(id string, ok bool, note string) {
 			a.Status = "error"
 			a.LastErr = note
 		}
+		return
+	}
+}
+
+// MarkCheckin 记录一次签到结果。
+func (s *Store) MarkCheckin(id, date string, reward int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.st.Accounts {
+		if a.ID != id {
+			continue
+		}
+		if date == "" {
+			date = time.Now().Format("2006-01-02")
+		}
+		a.LastCheckinDate = date
+		a.LastCheckinAt = time.Now().Unix()
+		a.LastCheckinReward = reward
+		return
+	}
+}
+
+// MarkTaskRun 累加自动任务计数。
+func (s *Store) MarkTaskRun(id, date string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range s.st.Accounts {
+		if a.ID != id {
+			continue
+		}
+		if date == "" {
+			date = time.Now().Format("2006-01-02")
+		}
+		if a.LastTaskDate != date {
+			a.LastTaskDate = date
+			a.LastTaskCount = 0
+		}
+		a.LastTaskCount += n
 		return
 	}
 }
