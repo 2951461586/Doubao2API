@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,13 +16,6 @@ import (
 
 // UpstreamBase 是豆包上游的推理入口。
 const UpstreamBase = "https://www.doubao.com"
-
-// ChromiumVersion 与桌面端内嵌 Chromium 对齐。
-const ChromiumVersion = "147.0.7727.149"
-
-// UserAgent 与桌面端一致。
-const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" +
-	ChromiumVersion + " Safari/537.36"
 
 // Error 是上游返回的业务错误。
 type Error struct {
@@ -58,6 +52,12 @@ func NewClient() *Client {
 }
 
 // SecurityParams 构造上游要求的公参。
+//
+// 对齐桌面端 3.45.5 的 getCommonParams：
+//   - aid/real_aid 用 work 变体 1044603；
+//   - device_platform 仍为 web（后端历史包袱），另发 doubao_device_platform=desktop；
+//   - fp 固定为 verify_<device_id>；
+//   - 增加 iid / doubao_pc_version / channel / web_platform。
 func SecurityParams(a *Account) url.Values {
 	v := url.Values{}
 	set := func(k, val string) {
@@ -65,29 +65,45 @@ func SecurityParams(a *Account) url.Values {
 			v.Set(k, val)
 		}
 	}
-	set("aid", AppID)
-	set("real_aid", AppID)
+	aid := a.AppIDValue()
+	set("aid", aid)
+	set("real_aid", aid)
 	set("device_id", a.DeviceID)
 	set("tea_uuid", a.DeviceID)
 	set("web_id", a.WebID)
+	set("iid", a.IID)
 	set("device_platform", "web")
+	set("doubao_device_platform", DevicePlatform)
+	set("web_platform", WebPlatform)
 	set("language", "zh")
 	set("region", "CN")
 	set("sys_region", "CN")
 	set("pkg_type", "release_version")
 	set("version_code", VersionCode)
-	set("pc_version", "2.1.7")
+	set("pc_version", a.PCVersionValue())
+	set("doubao_pc_version", a.PCVersionValue())
 	set("chromium_version", ChromiumVersion)
 	set("client_platform", ClientPlatform)
+	set("channel", a.ChannelValue())
 	set("runtime", "web")
-	set("runtime_version", RuntimeVersion)
+	set("runtime_version", a.RuntimeVersionValue())
 	set("samantha_web", "1")
 	set("use-olympus-account", "1")
-	set("fp", a.FP)
-	set("web_tab_id", NewUUID())
+	set("fp", a.FPValue())
+	set("web_tab_id", a.webTabID())
 	if a.MsToken != "" {
 		v.Set("msToken", a.MsToken)
 	}
+	return v
+}
+
+// csrfParams 返回刷新 CSRF token 的查询参数。
+//
+// 桌面端在该接口上显式把 real_aid 置空；带 real_aid 会被判为「非法应用」(error_code=22)。
+func csrfParams(a *Account) url.Values {
+	v := SecurityParams(a)
+	v.Del("real_aid")
+	v.Del("msToken")
 	return v
 }
 
@@ -107,6 +123,7 @@ func textBlock(text string) map[string]any {
 		"block_id":      NewUUID(),
 		"parent_id":     "",
 		"meta_info":     []any{},
+		"extra_info":    map[string]any{},
 		"append_fields": []any{},
 		"is_finish":     true,
 		"patch_type":    2,
@@ -224,13 +241,107 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 
 	ext := map[string]any{
 		"use_deep_think":                think,
-		"fp":                            a.FP,
+		"fp":                            a.FPValue(),
 		"use_submit_pipeline":           "1",
 		"commerce_credit_config_enable": "0",
 		"sub_conv_firstmet_type":        "1",
 	}
 	if req.InputSkill != "" {
 		ext["input_skill"] = req.InputSkill
+	}
+	if len(req.SelectedSkills) > 0 {
+		ext["mention_skill_list"] = req.SelectedSkills
+	}
+	// 调用方显式透传的 ext 字段（高级用法，覆盖同名默认值）。
+	for k, val := range req.Ext {
+		if k == "" || val == nil {
+			continue
+		}
+		ext[k] = val
+	}
+
+	option := map[string]any{
+		"send_message_scene": "",
+		"create_time_ms":     0,
+		"collect_id":         "",
+		"is_audio":           false,
+		// 必须为 true：置 false 会导致上游不返回思维链（已实测）
+		"answer_with_suggest":      true,
+		"tts_switch":               false,
+		"need_deep_think":          req.ThinkLevel,
+		"click_clear_context":      false,
+		"from_suggest":             false,
+		"is_regen":                 false,
+		"is_replace":               false,
+		"is_from_click_option":     false,
+		"is_from_click_softlink":   false,
+		"is_select_text":           false,
+		"disable_sse_cache":        false,
+		"select_text_action":       "",
+		"resend_for_regen":         false,
+		"scene_type":               0,
+		"unique_key":               NewUUID(),
+		"start_seq":                0,
+		"need_create_conversation": true,
+		"conversation_init_option": map[string]any{
+			"need_ack_conversation": true,
+		},
+		"regen_query_id":       []any{},
+		"edit_query_id":        []any{},
+		"regen_instruction":    "",
+		"no_replace_for_regen": false,
+		"message_from":         0,
+		"shared_app_name":      "",
+		"action_bar_skill_id":  req.SkillID,
+		"sse_recv_event_options": map[string]any{
+			"support_chunk_delta": true,
+		},
+		"is_ai_playground": false,
+	}
+	if req.AgentMode > 0 {
+		option["agent_mode"] = req.AgentMode
+	}
+
+	// conversation_init_ext / model_config / aggregate_params 是新版客户端的
+	// 模型选择 + 推理强度参数；仅在调用方显式传入时下发，且不发送空键
+	// （带空 model_item_key 会被上游判为 common invalid param）。
+	initExt := map[string]any{}
+	if req.ModelItemKey != "" {
+		initExt["model_item_key"] = req.ModelItemKey
+	}
+	if req.ModeID != "" {
+		initExt["mode_id"] = req.ModeID
+	}
+	if req.SelectionMode {
+		initExt["selection_mode"] = true
+	}
+	if len(initExt) > 0 {
+		option["conversation_init_ext"] = initExt
+	}
+
+	modelConfig := map[string]any{}
+	if req.ModelItemKey != "" {
+		modelConfig["model_item_key"] = req.ModelItemKey
+		if req.ReasoningEffort != "" {
+			modelConfig["reasoning_effort"] = req.ReasoningEffort
+		}
+	}
+	if len(modelConfig) > 0 {
+		option["model_config"] = modelConfig
+	}
+
+	agg := map[string]any{}
+	if req.ModelItemKey != "" {
+		agg["model_item_key"] = req.ModelItemKey
+		if req.ReasoningEffort != "" {
+			agg["reasoning_effort"] = req.ReasoningEffort
+		}
+	}
+	if req.ModeID != "" {
+		agg["mode_id"] = req.ModeID
+	}
+	if len(agg) > 0 {
+		option["aggregate_params"] = agg
 	}
 
 	return map[string]any{
@@ -248,39 +359,7 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 				"message_status":   0,
 			},
 		},
-		"option": map[string]any{
-			"send_message_scene": "",
-			"create_time_ms":     0,
-			"collect_id":         "",
-			"is_audio":           false,
-			// 必须为 true：置 false 会导致上游不返回思维链（已实测）
-			"answer_with_suggest":      true,
-			"tts_switch":               false,
-			"need_deep_think":          req.ThinkLevel,
-			"click_clear_context":      false,
-			"from_suggest":             false,
-			"is_regen":                 false,
-			"is_replace":               false,
-			"disable_sse_cache":        false,
-			"select_text_action":       "",
-			"resend_for_regen":         false,
-			"scene_type":               0,
-			"unique_key":               NewUUID(),
-			"start_seq":                0,
-			"need_create_conversation": true,
-			"conversation_init_option": map[string]any{
-				"need_ack_conversation": true,
-			},
-			"regen_query_id":         []any{},
-			"edit_query_id":          []any{},
-			"regen_instruction":      "",
-			"no_replace_for_regen":   false,
-			"message_from":           0,
-			"shared_app_name":        "",
-			"action_bar_skill_id":    req.SkillID,
-			"sse_recv_event_options": map[string]any{"support_chunk_delta": true},
-			"is_ai_playground":       false,
-		},
+		"option":       option,
 		"chat_ability": map[string]any{},
 		"ext":          ext,
 	}
@@ -289,6 +368,8 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 // ChatStream 向 /chat/completion 发起流式请求，逐块回调。
 //
 // 回调返回错误即中止并向上传递。
+// 请求前会确保 CSRF token 可用；若上游以登录/CSRF 类错误拒绝且尚未输出任何内容，
+// 会自动强制刷新 token 并重试一次。
 func (c *Client) ChatStream(ctx context.Context, a *Account, req ChatRequest, onChunk func(CompletionChunk) error) error {
 	payload := BuildPayload(a, req)
 	body, err := json.Marshal(payload)
@@ -296,21 +377,48 @@ func (c *Client) ChatStream(ctx context.Context, a *Account, req ChatRequest, on
 		return err
 	}
 
-	u := UpstreamBase + "/chat/completion?" + SecurityParams(a).Encode()
+	emitted := false
+	wrapped := func(ch CompletionChunk) error {
+		emitted = true
+		return onChunk(ch)
+	}
+
+	if err := c.ensureCSRF(ctx, a, false); err != nil {
+		// 预刷新失败不阻断：Cookie 里的 token 往往仍可用。
+		_ = err
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			if _, err := c.RefreshCSRF(ctx, a); err != nil {
+				return lastErr
+			}
+		}
+		err := c.chatOnce(ctx, a, body, wrapped)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// 已输出内容则不再重试，避免重复；非鉴权错误也不重试。
+		if emitted || !looksLikeAuthError(err.Error()) {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// chatOnce 执行一次 /chat/completion 请求。
+func (c *Client) chatOnce(ctx context.Context, a *Account, body []byte, onChunk func(CompletionChunk) error) error {
+	params := SecurityParams(a)
+	params.Set("tz_name", tzName())
+	u := UpstreamBase + "/chat/completion?" + params.Encode()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	hreq.Header.Set("Accept", "text/event-stream")
-	hreq.Header.Set("Content-Type", "application/json")
-	hreq.Header.Set("User-Agent", UserAgent)
-	hreq.Header.Set("Origin", UpstreamBase)
-	hreq.Header.Set("Referer", UpstreamBase+"/chat/")
-	hreq.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	if t := a.CSRFToken(); t != "" {
-		hreq.Header.Set("x-tt-passport-csrf-token", t)
-	}
-	hreq.Header.Set("Cookie", CookieHeader(a.Cookies))
+	setUpstreamHeaders(hreq, a)
 
 	resp, err := c.HTTP.Do(hreq)
 	if err != nil {
@@ -320,11 +428,14 @@ func (c *Client) ChatStream(ctx context.Context, a *Account, req ChatRequest, on
 
 	ct := resp.Header.Get("Content-Type")
 	if !strings.Contains(ct, "text/event-stream") {
-		// 上游可能直接返回 JSON 错误（如会话过期）
+		// 上游可能直接返回 JSON 错误（如会话过期、CSRF 失效）
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		var e Error
 		if json.Unmarshal(raw, &e) == nil && (e.Code != 0 || e.Msg != "") {
 			return &e
+		}
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return fmt.Errorf("上游拒绝访问 (HTTP %d): %s", resp.StatusCode, truncate(string(raw), 300))
 		}
 		return fmt.Errorf("上游返回非流式响应 (HTTP %d, %s): %s", resp.StatusCode, ct, truncate(string(raw), 300))
 	}
@@ -332,10 +443,30 @@ func (c *Client) ChatStream(ctx context.Context, a *Account, req ChatRequest, on
 	return parseStream(resp.Body, onChunk)
 }
 
+// tzName 返回 IANA 时区名（客户端在 query 里传 tz_name）。
+func tzName() string {
+	if tz := os.Getenv("TZ"); tz != "" {
+		return tz
+	}
+	if name := time.Now().Location().String(); name != "Local" && name != "" {
+		return name
+	}
+	return "Asia/Shanghai"
+}
+
 // parseStream 解析上游 SSE，把增量回调给调用方。
 func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 	thinkingCount := 0
 	inThinking := false
+	seen := map[string]bool{}
+	seenTool := map[string]bool{}
+	emitTool := func(text string) error {
+		if text == "" || seenTool[text] {
+			return nil
+		}
+		seenTool[text] = true
+		return onChunk(CompletionChunk{ToolInfo: text})
+	}
 
 	return ReadSSE(r, func(ev SSEEvent) error {
 		if ev.Event == "gateway-error" {
@@ -348,15 +479,15 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 		if ev.Data == "" {
 			return nil
 		}
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(ev.Data), &obj); err != nil {
+		obj, ok := decodeObj(ev.Data)
+		if !ok {
 			return nil // 非 JSON 事件直接跳过
 		}
 
 		// 会话建立
 		if ev.Event == "SSE_ACK" {
 			if ack, ok := obj["ack_client_meta"].(map[string]any); ok {
-				if cid := str(ack["conversation_id"]); cid != "" && cid != "0" {
+				if cid := idOf(ack["conversation_id"]); cid != "" && cid != "0" {
 					if err := onChunk(CompletionChunk{ConvID: cid}); err != nil {
 						return err
 					}
@@ -391,6 +522,13 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 		for _, cb := range iterBlocks(obj) {
 			bt := intOf(cb["block_type"])
 			content, _ := cb["content"].(map[string]any)
+			if content == nil {
+				// 部分响应使用 content_obj
+				content, _ = cb["content_obj"].(map[string]any)
+			}
+			blockID := idOf(cb["block_id"])
+			finished := truthy(cb["is_finish"])
+
 			switch bt {
 			case BlockThinking:
 				thinkingCount++
@@ -412,22 +550,113 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 				lb, _ := content["loading_block"].(map[string]any)
 				tl, _ := lb["text_loading"].(map[string]any)
 				if t := str(tl["text"]); t != "" {
-					if err := onChunk(CompletionChunk{ToolInfo: t}); err != nil {
+					if err := emitTool(t); err != nil {
 						return err
 					}
 				}
 			case BlockGenericTool:
-				gtb, _ := content["generic_tool_block"].(map[string]any)
-				if title := str(gtb["title"]); title != "" {
-					if err := onChunk(CompletionChunk{ToolInfo: "[tool] " + title}); err != nil {
+				if title := blockText(content, "generic_tool_block"); title != "" {
+					if err := emitTool("[tool] " + title); err != nil {
 						return err
 					}
 				}
-			case BlockSearchResult:
-				sqrb, _ := content["search_query_result_block"].(map[string]any)
-				if len(sqrb) > 0 {
-					if s := str(sqrb["summary"]); s != "" {
-						if err := onChunk(CompletionChunk{ToolInfo: "[search] " + s}); err != nil {
+			case BlockSearchQuery:
+				if q := blockText(content, "search_query_block"); q != "" {
+					if err := emitTool("[search] 查询: " + q); err != nil {
+						return err
+					}
+				}
+			case BlockSearchResult, BlockSearchResultV2, BlockSearchRichMedia:
+				if s := firstNonEmpty(blockField(content, "search_query_result_block", "summary"), blockField(content, "search_result_block", "summary")); s != "" {
+					if err := emitTool("[search] " + s); err != nil {
+						return err
+					}
+				}
+				for _, src := range blockSources(content) {
+					key := "src:" + src.URL + "|" + src.Title
+					if src.URL == "" || seen[key] {
+						continue
+					}
+					seen[key] = true
+					if err := onChunk(CompletionChunk{Sources: []SearchSource{src}}); err != nil {
+						return err
+					}
+				}
+			case BlockCode:
+				cbk, _ := content["code_block"].(map[string]any)
+				code := str(cbk["code"])
+				if code == "" {
+					break
+				}
+				// 代码会随 patch 不断增长；仅在块已完成时输出一次。
+				if !finished {
+					break
+				}
+				key := "code:" + blockID + ":" + code
+				if seen[key] {
+					break
+				}
+				seen[key] = true
+				lang := codeLang(intOf(cbk["type"]))
+				if err := onChunk(CompletionChunk{Text: "\n```" + lang + "\n" + code + "\n```\n"}); err != nil {
+					return err
+				}
+			case BlockGenImage:
+				for _, cr := range parseGenImages(content) {
+					key := "img:" + cr.URL
+					if cr.URL == "" || seen[key] {
+						continue
+					}
+					seen[key] = true
+					if err := onChunk(CompletionChunk{Creations: []Creation{cr}}); err != nil {
+						return err
+					}
+				}
+			case BlockImageAnalysis, BlockResearch, BlockResearchStatus, BlockResearchWebpage:
+				if t := blockText(content, blockKeyFor(bt)); t != "" {
+					if err := emitTool("[" + blockTag(bt) + "] " + t); err != nil {
+						return err
+					}
+				}
+			case BlockFileOperation:
+				if t := firstNonEmpty(blockField(content, "file_operation_block", "title"), blockField(content, "file_operation_block", "summary")); t != "" {
+					if err := emitTool("[file] " + t); err != nil {
+						return err
+					}
+				}
+			case BlockArtifact, BlockArtifactOp, BlockArtifactCode:
+				for _, art := range parseArtifacts(content) {
+					key := "art:" + art.ResourceID + art.ArtifactID + art.Title
+					if seen[key] || (art.ResourceID == "" && art.Title == "" && art.ArtifactID == "") {
+						continue
+					}
+					seen[key] = true
+					if err := onChunk(CompletionChunk{Artifacts: []Artifact{art}}); err != nil {
+						return err
+					}
+				}
+			case BlockLink, BlockReference, BlockTips:
+				for _, src := range blockSources(content) {
+					key := "src:" + src.URL + "|" + src.Title
+					if src.URL == "" || seen[key] {
+						continue
+					}
+					seen[key] = true
+					if err := onChunk(CompletionChunk{Sources: []SearchSource{src}}); err != nil {
+						return err
+					}
+				}
+				if t := blockText(content, blockKeyFor(bt)); t != "" {
+					if err := emitTool("[" + blockTag(bt) + "] " + t); err != nil {
+						return err
+					}
+				}
+			case BlockLyricsMusic:
+				if m := parseMusic(content); m != nil {
+					key := "music:" + m.VideoID + m.Title
+					if !seen[key] {
+						seen[key] = true
+						if err := onChunk(CompletionChunk{Music: m}); err != nil {
 							return err
 						}
 					}
@@ -438,6 +667,15 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 						return err
 					}
 				}
+			default:
+				// 未知块：仅在带 summary/title 时作为工具提示透传，避免丢信息。
+				if bt >= 10000 {
+					if t := firstNonEmpty(blockField(content, blockKeyFor(bt), "summary"), blockField(content, blockKeyFor(bt), "title")); t != "" {
+						if err := emitTool("[" + blockTag(bt) + "] " + t); err != nil {
+							return err
+						}
+					}
+				}
 			}
 		}
 
@@ -446,8 +684,7 @@ func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
 			pm, _ := po.(map[string]any)
 			pv, _ := pm["patch_value"].(map[string]any)
 			if cs, ok := pv["content"].(string); ok && cs != "" {
-				var inner map[string]any
-				if json.Unmarshal([]byte(cs), &inner) == nil {
+				if inner, ok := decodeObj(cs); ok {
 					if t := str(inner["text"]); t != "" {
 						ch := CompletionChunk{}
 						if inThinking {
@@ -553,14 +790,20 @@ func asSlice(v any) []any {
 }
 
 func str(v any) string {
-	if s, ok := v.(string); ok {
-		return s
+	switch t := v.(type) {
+	case string:
+		return t
+	case json.Number:
+		return t.String()
 	}
 	return ""
 }
 
 func intOf(v any) int {
 	switch n := v.(type) {
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
 	case float64:
 		return int(n)
 	case int:

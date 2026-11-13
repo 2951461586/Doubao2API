@@ -83,13 +83,25 @@ func chromiumProfiles(userData string) []string {
 }
 
 // regexpWebID / regexpDeviceID 用于从 Chromium Local Storage 中
-// 尽力提取桌面端写入的指纹值（leveldb 为二进制，按子串匹配）。
+// 尽力提取桌面端写入的指纹值（leveldb 为二进制 / 可能 Snappy 压缩，按子串匹配）。
 func regexpWebID() *regexp.Regexp {
-	return regexp.MustCompile(`web_id":"(\d{15,20})`)
+	return regexp.MustCompile(`web_id"?\s*:\s*"?(\d{15,20})`)
 }
 
 func regexpDeviceID() *regexp.Regexp {
-	return regexp.MustCompile(`device_id":"(\d{15,20})`)
+	return regexp.MustCompile(`device_?[iI]d"?\s*:\s*"?(\d{12,20})`)
+}
+
+func regexpIID() *regexp.Regexp {
+	return regexp.MustCompile(`iid"?\s*:\s*"?(\d{12,20})`)
+}
+
+func regexpAppVersion() *regexp.Regexp {
+	return regexp.MustCompile(`appVersion"?\s*:\s*"?(\d+\.\d+\.\d+)`)
+}
+
+func regexpBuildChannel() *regexp.Regexp {
+	return regexp.MustCompile(`buildChannel"?\s*:\s*"?([A-Za-z0-9_-]{2,20})`)
 }
 
 // defaultFP 生成一个形如上游 fp 参数的指纹占位值。
@@ -152,6 +164,9 @@ func AccountFromCookieString(cookieStr, name string) (*Account, error) {
 	if ms := cookies["msToken"]; ms != "" {
 		a.MsToken = ms
 	}
+	// 客户端指纹固定为 verify_<device_id>（见桌面端 getCommonParams 的 partial 参数）。
+	a.FP = "verify_" + a.DeviceID
+	a.WebTabID = NewUUID()
 	return a, nil
 }
 

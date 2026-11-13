@@ -371,12 +371,16 @@ func bodyReader(b []byte) io.Reader {
 }
 
 // setUpstreamHeaders 写入调用豆包业务接口所需的公共请求头。
+//
+// Agw-Js-Conv: str 让网关把 int64 以字符串返回，避免 conversation_id /
+// message_id 在 JSON number 下丢失精度（实测 ACK 里的会话 ID 就靠它）。
 func setUpstreamHeaders(req *http.Request, a *Account) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("User-Agent", a.UAValue())
 	req.Header.Set("Origin", UpstreamBase)
 	req.Header.Set("Referer", UpstreamBase+"/chat/")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Agw-Js-Conv", "str")
 	if t := a.CSRFToken(); t != "" {
 		req.Header.Set("x-tt-passport-csrf-token", t)
 	}

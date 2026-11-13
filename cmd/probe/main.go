@@ -146,9 +146,10 @@ func main() {
 		}
 		hreq.Header.Set("Content-Type", "application/json")
 		hreq.Header.Set("Accept", "text/event-stream")
-		hreq.Header.Set("User-Agent", doubao.UserAgent)
+		hreq.Header.Set("User-Agent", a.UAValue())
 		hreq.Header.Set("Origin", doubao.UpstreamBase)
 		hreq.Header.Set("Referer", doubao.UpstreamBase+"/chat/")
+		hreq.Header.Set("Agw-Js-Conv", "str")
 		if t := a.CSRFToken(); t != "" {
 			hreq.Header.Set("x-tt-passport-csrf-token", t)
 		}
@@ -186,9 +187,10 @@ func main() {
 		panic(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", doubao.UserAgent)
+	req.Header.Set("User-Agent", a.UAValue())
 	req.Header.Set("Origin", doubao.UpstreamBase)
 	req.Header.Set("Referer", doubao.UpstreamBase+"/chat/")
+	req.Header.Set("Agw-Js-Conv", "str")
 	if t := a.CSRFToken(); t != "" {
 		req.Header.Set("x-tt-passport-csrf-token", t)
 	}

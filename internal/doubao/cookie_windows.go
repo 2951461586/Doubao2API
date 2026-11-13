@@ -254,13 +254,27 @@ func ImportAllFromDesktop(explicitDir string) ([]*ImportResult, error) {
 			acct.Source = "auto-import"
 			acct.Name = fmt.Sprintf("DoubaoWork/%s", prof)
 			// 设备指纹优先从桌面端本地存储读取
-			if dev, web := readDeviceIDs(userData, prof); dev != "" || web != "" {
-				if dev != "" {
-					acct.DeviceID = dev
-				}
-				if web != "" {
-					acct.WebID = web
-				}
+			info := readDeviceInfo(userData, prof)
+			if info.deviceID != "" {
+				acct.DeviceID = info.deviceID
+			}
+			if info.webID != "" {
+				acct.WebID = info.webID
+			}
+			if info.iid != "" {
+				acct.IID = info.iid
+			}
+			if info.appVersion != "" {
+				acct.AppVersion = info.appVersion
+				acct.PCVersion = info.appVersion
+			}
+			if info.channel != "" {
+				acct.Channel = info.channel
+			}
+			// 客户端指纹固定为 verify_<device_id>，而不是随机串。
+			acct.FP = "verify_" + acct.DeviceID
+			if acct.WebTabID == "" {
+				acct.WebTabID = NewUUID()
 			}
 			out = append(out, &ImportResult{Account: acct, Profile: prof, Dir: userData, Cookies: len(rows)})
 		}
@@ -304,8 +318,11 @@ func accountFromCookies(rows []cookieRow) *Account {
 	if acct.WebID == "" {
 		acct.WebID = RandomDigits(19)
 	}
-	if acct.FP == "" {
-		acct.FP = defaultFP()
+	if acct.FP == "" || !strings.HasPrefix(acct.FP, "verify_") {
+		acct.FP = "verify_" + acct.DeviceID
+	}
+	if acct.WebTabID == "" {
+		acct.WebTabID = NewUUID()
 	}
 	return acct
 }
@@ -319,16 +336,31 @@ func findCookie(rows []cookieRow, name string) string {
 	return ""
 }
 
-// readDeviceIDs 从 Chromium Local Storage 中尽力读取设备指纹。
-// 读取失败返回空串，调用方回退到随机占位值。
-func readDeviceIDs(userData, profile string) (deviceID, webID string) {
+// deviceInfo 是从 Chromium Local Storage 尽力读出的设备信息。
+type deviceInfo struct {
+	deviceID   string
+	webID      string
+	iid        string
+	appVersion string
+	channel    string
+}
+
+// readDeviceInfo 从 Chromium Local Storage 中尽力读取设备指纹 / 应用版本。
+//
+// leveldb 里是（可能是 Snappy 压缩的）键值块，这里用宽松正则做子串匹配：
+// 匹配不到也不影响功能，调用方会回退到随机占位值。
+func readDeviceInfo(userData, profile string) deviceInfo {
+	var out deviceInfo
 	dir := filepath.Join(userData, profile, "Local Storage", "leveldb")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return "", ""
+		return out
 	}
 	webRe := regexpWebID()
 	devRe := regexpDeviceID()
+	iidRe := regexpIID()
+	appRe := regexpAppVersion()
+	chanRe := regexpBuildChannel()
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -338,21 +370,36 @@ func readDeviceIDs(userData, profile string) (deviceID, webID string) {
 			continue
 		}
 		s := string(raw)
-		if webID == "" {
+		if out.webID == "" {
 			if m := webRe.FindStringSubmatch(s); m != nil {
-				webID = m[1]
+				out.webID = m[1]
 			}
 		}
-		if deviceID == "" {
+		if out.deviceID == "" {
 			if m := devRe.FindStringSubmatch(s); m != nil {
-				deviceID = m[1]
+				out.deviceID = m[1]
 			}
 		}
-		if webID != "" && deviceID != "" {
+		if out.iid == "" {
+			if m := iidRe.FindStringSubmatch(s); m != nil {
+				out.iid = m[1]
+			}
+		}
+		if out.appVersion == "" {
+			if m := appRe.FindStringSubmatch(s); m != nil {
+				out.appVersion = m[1]
+			}
+		}
+		if out.channel == "" {
+			if m := chanRe.FindStringSubmatch(s); m != nil {
+				out.channel = m[1]
+			}
+		}
+		if out.webID != "" && out.deviceID != "" && out.iid != "" && out.appVersion != "" && out.channel != "" {
 			break
 		}
 	}
-	return deviceID, webID
+	return out
 }
 
 func copyFile(src, dst string) error {
