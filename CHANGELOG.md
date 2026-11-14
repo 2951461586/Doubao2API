@@ -35,6 +35,13 @@
 
 ### Added
 
+- **工作模式（agent_mode=1）模型**：`/v1/models` 新增 `deepseek-v4-flash`
+  （默认档）、`deepseek-v4-pro`、`kimi-k3`、`kimi-k3.1-pro`、`doubao-2.1-pro`，
+  并带出上游 `model_item_key` 与 `agent_mode` 字段；别名 `deepseek` / `kimi` /
+  `deepseek-flash` / `deepseek-pro` / `kimi-k3.1`。
+  实测：经网关调用返回 200 + `conversation_id`，`kimi-k3` 流式 4 chunk 正常收尾。
+  构造要点（三处 `model_item_key` 一致、`reasoning_effort` 只放 `conversation_init_ext`、
+  不下发任何沙箱字段）见 `docs/recon.md` §6.12。
 - `scripts/console-selftest.mjs`：用 CDP 驱动无头 Chrome 逐个点击侧栏并断言切页，
   作为控制台改动的回归手段（用法见 CONTRIBUTING）。
 - `scripts/recon_pak_probe.py`（按关键字定位 pak 内 blob）与

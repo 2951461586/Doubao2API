@@ -426,9 +426,47 @@ let d = {
   这类键，而参考项目的 `agent_task_param` / `task_input_json` / `conversation_mode`
   在当前 147 bundle 里 **0 命中** —— 那些是它按旧版或自行重构的写法，不能照抄。
 
-若要继续，唯一的可靠路径是：**抓一次真实客户端工作模式的完整请求体**
-（桌面端切「工作任务」发一条消息 + mitmproxy/Fiddler），或先逆出沙箱创建接口
-（`create_sandbox_instance` 一类）再决定是否值得做。
+#### 结论修正：工作模式「不用沙箱」就能跑通（已实测）
+
+上面的沙箱结论只解释**工具调用**为什么做不到，并不代表工作模式本身不能用。
+进一步实测发现：**只要不下发沙箱相关字段，工作模式会话完全可用**。
+
+构造方式（`agent_mode>0` 分支，见 `internal/doubao/client.go`）：
+
+```jsonc
+option: {
+  agent_mode: 1,
+  conversation_mode: 2,
+  mode_id: "3",
+  need_deep_think: 10001,          // 工作模式固定值，普通对话是 0/1/3
+  conversation_init_ext: { model_item_key, reasoning_effort: "4" },
+  model_config:          { model_item_key },
+  aggregate_params:      { model_item_key }
+}
+ext: { use_deep_think: "10001" }
+```
+
+关键约束（踩过的坑）：
+
+- `model_item_key` 必须在上面三处**一致**，且不能为空；
+- `reasoning_effort` **只在 `conversation_init_ext` 里下发**（放进 `model_config` /
+  `aggregate_params` 会被判 `710020202 common invalid param`）；
+- 不要带 `mode_name`（同样会触发 invalid param）；
+- 沙箱相关字段（`client_option` / `sandbox_id` / `sandbox_env_id` / `general_task_param`）
+  **一律不要下发**；一旦带上，就必须是上游签发过的实例 id。
+
+实测：`/v1/models` 已包含 5 个工作模式模型（`deepseek-v4-flash` / `-pro`、
+`kimi-k3`、`kimi-k3.1-pro`、`doubao-2.1-pro`），经网关调用返回 200 +
+`conversation_id`；`kimi-k3` 流式验证通过（4 个 chunk、正常 `[DONE]`、
+回答 `Hello! Nice to meet you.`）。
+
+仍缺的部分是**工具调用**：上游把工具调用放在 `/alice/office/tool_local/msg/fetch`
+长轮询里（不是 SSE），需要网关实现"建沙箱 → 拉取工具调用 → 本地执行 → 上传结果"
+的完整回路，其中沙箱实例 id 必须由上游预建（`pre_build_sandbox_key` →
+`upload_prebuild_sandbox_result`）。这属于新增运行时，未实现。
+
+> 若真要实现，注意安全边界：模型可以要求在"沙箱"里执行任意命令/读写文件，
+> 网关侧实现等于把 RCE 暴露给模型输出，必须配合白名单/容器隔离，不能直接跑在本机。
 
 ### 6.11 积分、签到与任务奖励
 

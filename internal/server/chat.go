@@ -129,15 +129,21 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		thinkLevel = thinkLevelFromEffort(v, thinkLevel)
 	}
 
+	// 工作模式模型（registry 里带 ModelItemKey 的）：模型选择优先于请求字段。
+	modelItemKey := extras.ModelItemKey
+	if model.ModelItemKey != "" {
+		modelItemKey = model.ModelItemKey
+	}
+
 	upReq := doubao.ChatRequest{
 		Text:            text,
 		ThinkLevel:      thinkLevel,
+		AgentMode:       model.AgentMode,
 		BotID:           req.BotID,
 		ConversationID:  req.ConversationID,
 		SkillID:         skillID,
 		InputSkill:      req.InputSkill,
-		AgentMode:       extras.AgentMode,
-		ModelItemKey:    extras.ModelItemKey,
+		ModelItemKey:    modelItemKey,
 		ModeID:          extras.ModeID,
 		SelectionMode:   extras.SelectionMode,
 		ReasoningEffort: extras.ReasoningEffort,

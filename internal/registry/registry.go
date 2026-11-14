@@ -23,6 +23,12 @@ type Model struct {
 	Desc       string `json:"description"`
 	// Skill 非 0 时，选中该模型会自动套用对应技能（option.action_bar_skill_id）。
 	Skill int `json:"skill,omitempty"`
+	// ModelItemKey 是上游工作模式的模型标识（modeSelectData 里的 key）。
+	//
+	// 非空表示该模型只能在工作模式（agent_mode=1）下使用。
+	ModelItemKey string `json:"model_item_key,omitempty"`
+	// AgentMode 非 0 时按工作模式下发（agent_mode=1、conversation_mode=2）。
+	AgentMode int `json:"agent_mode,omitempty"`
 }
 
 // Builtin 是内置模型清单。
@@ -43,6 +49,34 @@ var Builtin = []Model{
 		ID: "doubao-expert", Name: "豆包·专家", ThinkLevel: doubao.ThinkExpert,
 		Context: 256000, Desc: "专家模式，深度推理，适合复杂任务",
 	},
+	// 工作模式（agent_mode=1）模型：modeSelectData.menuConfV2.mode_list 里的
+	// model_item_key，实测可用（见 docs/recon.md §6.12）。这些模型只能在工作模式使用。
+	{
+		ID: "deepseek-v4-flash", Name: "DeepSeek V4.1 Flash", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式默认档，限时低倍率",
+		ModelItemKey: "person-deepseek-v4-1-flash-261017", AgentMode: 1,
+	},
+	{
+		ID: "deepseek-v4-pro", Name: "DeepSeek V4.1 Pro", ThinkLevel: doubao.ThinkExpert,
+		Context: 300000, Desc: "工作模式，DeepSeek 深度推理",
+		ModelItemKey: "person-deepseek-v4-pro-ga-260813", AgentMode: 1,
+	},
+	{
+		ID: "kimi-k3", Name: "Kimi K3", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式，Kimi K3",
+		ModelItemKey: "person-kimi-k3-261111", AgentMode: 1,
+	},
+	{
+		ID: "kimi-k3.1-pro", Name: "Kimi K3.1 Pro", ThinkLevel: doubao.ThinkExpert,
+		Context: 300000, Desc: "工作模式，Kimi K3.1 Pro",
+		ModelItemKey: "person-kimi-k3-1-pro-261111", AgentMode: 1,
+	},
+	{
+		ID: "doubao-2.1-pro", Name: "豆包 2.1 Pro", ThinkLevel: doubao.ThinkOn,
+		Context: 256000, Desc: "工作模式，豆包 2.1 Pro",
+		ModelItemKey: "5", AgentMode: 1,
+	},
+
 	// 技能模型（对齐桌面端 SkillType）
 	{ID: "doubao-draw", Name: "豆包·绘画", ThinkLevel: doubao.ThinkOff, Skill: doubao.SkillImageGen, Context: 32000, Desc: "图像生成技能（Seedream）"},
 	{ID: "doubao-search", Name: "豆包·搜索", ThinkLevel: doubao.ThinkOn, Skill: doubao.SkillSearch, Context: 128000, Desc: "AI 搜索技能（联网）"},
@@ -79,6 +113,11 @@ var aliases = map[string]string{
 	"doubao-coding":     "doubao-code",
 	"doubao-python":     "doubao-data",
 	"doubao-slides":     "doubao-ppt",
+	"deepseek":          "deepseek-v4-flash",
+	"deepseek-flash":    "deepseek-v4-flash",
+	"deepseek-pro":      "deepseek-v4-pro",
+	"kimi":              "kimi-k3",
+	"kimi-k3.1":         "kimi-k3.1-pro",
 }
 
 // Resolve 把用户传入的模型名解析为内置模型。

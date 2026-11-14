@@ -363,6 +363,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				"skill":       m.Skill,
 				"context":     m.Context,
 				"description": m.Desc,
+				// 工作模式模型（agent_mode=1）会带出上游 model_item_key。
+				"model_item_key": m.ModelItemKey,
+				"agent_mode":     m.AgentMode,
 			},
 		})
 	}

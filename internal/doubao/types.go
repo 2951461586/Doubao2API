@@ -72,6 +72,16 @@ const (
 	SkillTranslateV2     = 5007
 )
 
+// 工作模式（agent_mode>0）常量。
+//
+// workModeDeepThink=10001 是工作模式下的固定取值；普通对话用的是 0/1/3 档位。
+const (
+	workModeConversationMode = 2
+	workModeDeepThink        = 10001
+	workModeDefaultModeID    = "3"
+	workModeDefaultEffort    = "4"
+)
+
 // 深度思考档位（option.need_deep_think / ext.use_deep_think）
 const (
 	ThinkOff    = 0 // 快速模式

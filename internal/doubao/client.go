@@ -347,6 +347,40 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 		option["aggregate_params"] = agg
 	}
 
+	// 工作模式（agent_mode>0）：会话按 agent 方式建立。
+	//
+	// 实测（docs/recon.md §6.12）不需要任何沙箱字段就能建会话并得到回复——
+	// 沙箱只在模型真正调用工具时才需要（那一步要走 tool_local 长轮询 + 预建实例，
+	// 网关未实现）。这里只负责把模式与模型选择下发正确。
+	if req.AgentMode > 0 {
+		modeID := firstNonEmpty(req.ModeID, workModeDefaultModeID)
+		option["agent_mode"] = req.AgentMode
+		option["conversation_mode"] = workModeConversationMode
+		option["mode_id"] = modeID
+		option["need_deep_think"] = workModeDeepThink
+		ext["use_deep_think"] = strconv.Itoa(workModeDeepThink)
+
+		// model_item_key 与 reasoning_effort 必须在三处保持一致（实测要求）。
+		if req.ModelItemKey != "" {
+			for _, k := range []string{"conversation_init_ext", "model_config", "aggregate_params"} {
+				m, _ := option[k].(map[string]any)
+				if m == nil {
+					m = map[string]any{}
+					option[k] = m
+				}
+				m["model_item_key"] = req.ModelItemKey
+				// reasoning_effort 只在 conversation_init_ext 里下发（手工验证通过的组合）；
+				// model_config / aggregate_params 里带它会被判 common invalid param。
+				if k == "conversation_init_ext" {
+					m["reasoning_effort"] = firstNonEmpty(req.ReasoningEffort, workModeDefaultEffort)
+				}
+			}
+		}
+		if _, ok := option["conversation_init_ext"].(map[string]any); !ok {
+			option["conversation_init_ext"] = map[string]any{"mode_id": modeID}
+		}
+	}
+
 	return map[string]any{
 		"client_meta": map[string]any{
 			"local_conversation_id": localConv,
