@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync/atomic"
 )
 
 // 本文件把上游 SSE 事件流还原成增量（CompletionChunk）。
@@ -14,9 +15,19 @@ import (
 //
 //go:generate true
 
+// ParseStats 是流解析的可观测计数。
+//
+// 目前只统计非 JSON 的 data 事件：上游协议漂移时这些事件会被跳过，
+// 若不计数据现为「回答空白」而毫无告警。计数是进程级累积值，
+// 由 /health 暴露给运维。
+type ParseStats struct {
+	NonJSONEvents atomic.Int64
+}
+
 // streamState 是解析一条 SSE 流期间的运行状态。
 type streamState struct {
 	onChunk func(CompletionChunk) error
+	stats   *ParseStats
 
 	// thinkingCount 记录已出现的思考容器块数量：
 	// 第 1 个容器内的文本算思维链，之后算正文（上游的补丁流约定）。
@@ -29,12 +40,25 @@ type streamState struct {
 
 // parseStream 解析上游 SSE，把增量回调给调用方。
 func parseStream(r io.Reader, onChunk func(CompletionChunk) error) error {
+	return parseStreamWithStats(r, nil, onChunk)
+}
+
+// parseStreamWithStats 同 parseStream，并累积可观测计数（stats 可为 nil）。
+func parseStreamWithStats(r io.Reader, stats *ParseStats, onChunk func(CompletionChunk) error) error {
 	st := &streamState{
 		onChunk:  onChunk,
+		stats:    stats,
 		seen:     map[string]bool{},
 		seenTool: map[string]bool{},
 	}
 	return ReadSSE(r, st.handleEvent)
+}
+
+// countNonJSON 记一次非 JSON 事件（stats 为 nil 时静默）。
+func (st *streamState) countNonJSON() {
+	if st.stats != nil {
+		st.stats.NonJSONEvents.Add(1)
+	}
 }
 
 // inThinking 报告当前增量是否属于思维链。
@@ -99,7 +123,9 @@ func (st *streamState) handleEvent(ev SSEEvent) error {
 	}
 	obj, ok := decodeObj(ev.Data)
 	if !ok {
-		return nil // 非 JSON 事件直接跳过
+		// 非 JSON 事件无法解析：计数后跳过（协议漂移时由 /health 暴露）。
+		st.countNonJSON()
+		return nil
 	}
 
 	// 工作模式：STREAM_MSG_NOTIFY 首帧带 agent_id，工具通道要用它。

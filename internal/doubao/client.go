@@ -35,7 +35,16 @@ func (e *Error) Error() string {
 // Client 是豆包上游客户端。
 type Client struct {
 	HTTP *http.Client
+
+	// stats 是进程级流解析计数，由 /health 暴露。
+	stats ParseStats
 }
+
+// NonJSONEvents 返回已跳过的非 JSON SSE 事件数。
+//
+// 该值持续累加：`/health` 报告它为奇数增长时，说明上游在推
+// 网关尚不认识的 data 事件（协议漂移的早期信号）。
+func (c *Client) NonJSONEvents() int64 { return c.stats.NonJSONEvents.Load() }
 
 // NewClient 构造上游客户端。
 func NewClient() *Client {
@@ -491,7 +500,7 @@ func (c *Client) chatOnce(ctx context.Context, a *Account, body []byte, onChunk 
 		return fmt.Errorf("上游返回非流式响应 (HTTP %d, %s): %s", resp.StatusCode, ct, truncate(string(raw), 300))
 	}
 
-	return parseStream(resp.Body, onChunk)
+	return parseStreamWithStats(resp.Body, &c.stats, onChunk)
 }
 
 // tzName 返回 IANA 时区名（客户端在 query 里传 tz_name）。

@@ -198,13 +198,19 @@ func handleCreation(st *streamState, _ int, content map[string]any, _ string, _ 
 
 // handleUnknownBlock 是未知块类型的兜底。
 //
-// 仅在带 summary / title 时作为工具提示透传，避免上游新增块类型时静默丢信息。
+// 带 summary / title 时透传为工具提示，避免上游新增块类型时静默丢信息。
+// 已声明但未注册 handler 的类型按约定键名取；真正未声明的类型没有键名，
+// 只能看 content 顶层（部分上游把 summary 直接放在块内容上）。
 func handleUnknownBlock(st *streamState, bt int, content map[string]any) error {
 	if bt < 10000 {
 		return nil
 	}
-	key := blockKeyFor(bt)
-	t := firstNonEmpty(blockField(content, key, "summary"), blockField(content, key, "title"))
+	var t string
+	if key := blockKeyFor(bt); key != "" {
+		t = firstNonEmpty(blockField(content, key, "summary"), blockField(content, key, "title"))
+	} else {
+		t = firstNonEmpty(str(content["summary"]), str(content["title"]), textOf(content["text"]))
+	}
 	if t == "" {
 		return nil
 	}
