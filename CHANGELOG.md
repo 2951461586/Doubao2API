@@ -4,7 +4,121 @@
 版本号遵循 `主.次.修订`：`internal/` 重构（不改变对外契约）走修订号，
 新增对外能力走次版本号，破坏性变更走主版本号。
 
-## [Unreleased]
+## [0.1.4] - 2026-11-14
+
+本轮以 issues.md 的 14 条运行问题为输入，按 **安全 → 可用性 → 账号池 → 结构 → 协议 → 交付**
+顺序落地，并完成模型清单与桌面端对齐、指纹实测。对外契约有破坏性变更（管理面、密钥接口），
+按约定走次版本号。
+
+### Security（破坏性）
+
+- **凭据不再明文落盘**：
+  - 管理密码改为 `pbkdf2-sha256$<iter>$<salt>$<hash>`（210k 轮，随机盐），
+    旧状态文件的 `admin_password` 明文在 `Open` 时自动迁移并清空；
+  - API 密钥只保存 SHA-256 指纹与展示片段（`sk-abc123…wxyz`），
+    **完整密钥仅在 `POST /admin/api/keys` 时返回一次**；
+  - 密钥的启停 / 删除改为按 `id` 定位（`?id=`，兼容旧的 `?key=`）。
+- **管理面不再有「未设密码则本机可裸奔」的退路**：未设置管理密码时
+  `/admin/api/*` 一律返回 503。管理密码也不再能调用 `/v1/*`。
+- **来源判定重写**（`internal/server/trust.go`）：`RemoteAddr` 之外还要看代理头。
+  带 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` 且来源不在
+  `trusted_proxies` 时，一律按远程处理——堵住 Funnel / nginx 把来源变成
+  `127.0.0.1` 导致的「仅本机」误放行。
+- **管理鉴权爆破防护**：同一来源 5 分钟失败 5 次 → 429 + `Retry-After`；
+  可选 `rate_limit_per_key` 对 `/v1/*` 按密钥限流（默认 0 = 不限）。
+- 新增设置：`trusted_proxies`、`admin_loopback_only`（裸机默认 true）、
+  `rate_limit_per_key`、`verbose_access_log`；
+  新增环境变量 `DOUBAO_TRUSTED_PROXIES`、`DOUBAO_ADMIN_LOOPBACK_ONLY`。
+- Docker 模板加固：`read_only`、`tmpfs /tmp`、`cap_drop: ALL`、
+  `no-new-privileges`、json-file 日志轮转；容器场景显式
+  `DOUBAO_ADMIN_LOOPBACK_ONLY=false`。
+
+### Added
+
+- **上游错误分型**（`doubao.Kind`）：`ok / business / account / timeout / canceled / transport`。
+  `/v1/*` 的状态码与 `error.type` 由分类决定（业务错误 422、超时 504、
+  客户端断开 499 仅记日志）。`Stats` 新增 `canceled_requests` / `business_errors`，
+  `LogEntry` 新增 `kind`——客户端主动断开不再抬高「上游失败率」。
+- **流式预检**：`/v1/chat/completions` 与 `/v1/messages` 在产生第一帧后才提交
+  SSE 头；上游在首帧前失败时返回普通 JSON 与真实状态码，不再出现
+  「200 + 一个多数 SDK 不解析的 error 帧」。
+- **总预算**：新增 `overall_timeout_sec`（默认 600s）。此前最坏耗时是
+  `request_timeout × max_retries`（300×3=15 分钟），客户端早已放弃。
+- **会话到期可见**：解析 `sid_guard` 推算 Cookie 到期时间，`/health` 输出
+  `warnings[]`（`session_expiring` / `session_expired` / `checkin_pending_stale` /
+  `no_api_keys` / `admin_disabled` / `admin_remote_access` / `cors_same_origin_only`）
+  与 `degraded`；控制台账号页显示剩余天数。
+- **`/readyz`**：没有可用账号时 503，供负载均衡使用；`/health` 保持永远 200。
+- **访问日志**：每个请求一行 `request id=… path=… status=… kind=… ms=… acct=…`，
+  错误文本过 `redact`（`sessionid` / `sid_guard` / `Authorization` / `Cookie` 等
+  键的值整段替换为 `***`）。
+- **状态备份**：每次保存保留 `<data>.json.bak`，按天生成 `backups/`（保留 7 份）；
+  新增 `POST /admin/api/state/snapshot`、`GET /admin/api/state/export`、
+  `POST /admin/api/state/import?confirm=1`（导入保留当前管理密码）。
+- **合并落盘**：`Store.StartAutosave` 每 30 秒在有变更时落盘；账号失败计数、
+  统计、密钥用量不再只在正常退出时保存。
+- **账号池调度**：失败冷却（30s→30m 指数退避）、一次请求内不重复选同一账号
+  （`NextAccountExcluding`）、重试退避抖动（200ms→2s）、单账号并发闸门
+  （`max_concurrent_per_account`，默认 2）；选中时即更新 `LastUsed`，
+  并发请求会分散到不同账号（此前 3 路并发会全部落在同一个号上）。
+- `cmd/probe -models`：打印模型清单与上游 `model_item_key`，便于核对
+  「名实相符」（issues.md #6）。
+
+### Changed
+
+- **模型清单与桌面端对齐**：`internal/registry` 按客户端缓存
+  `_DesktopActionBarBriefListRequestCacheDataV1` 重写 —— 补齐 `自动`(9)、
+  `豆包 2.1 Lite`(seed-lite-7b)、`Kimi K3.1 Pro 高速`、`GLM 5.3`、`GLM 5.3 Flash`，
+  统一名称（`DeepSeek V4 Pro`）与上下文（256K/300K），并带上客户端推理档位。
+  别名同步调整：`doubao-pro` → `doubao-2.1-pro`、`doubao-lite` → `doubao-2.1-lite`，
+  新增 `glm` / `glm-flash` / `kimi-fast` / `seed-lite` 等。
+  新增 `internal/doubao/client_models.go` 解析客户端 `Preferences` 缓存，
+  `doubao2api-probe -client-models` 可打印各 profile 清单并与 registry 做差异比对
+  （`TestRegistryCoversClientModels` 锁定清单，客户端升级后比对即可发现漂移）。
+- `/v1/models` 的 `created` 改为固定的 `registry.CreatedAt`（此前每次请求取
+  `time.Now()`，响应不可缓存）。
+- `deepseek-v4-pro` 的展示名改为「DeepSeek V4 Pro（GA）」，与其上游键
+  `person-deepseek-v4-pro-ga-260813` 对齐；新增 `registry` 审计测试，
+  名称与键的版本号不一致会直接失败。
+- 请求体上限统一为 `maxBodyBytes`（16MB），chat / anthropic 不再各用一套。
+- HTTP 客户端补齐 `DialContext` / `TLSHandshakeTimeout` /
+  `ResponseHeaderTimeout` / `ConnsPerHost`，避免建连黑洞占满总预算。
+- `State` 新增 `meta`（`schema_version` / `created_at` / `booted_at`），
+  `stats.started_at` 不再被误读成「本次部署时间」。
+- 结构重构：`server` 拆为 `routes/auth/cors/errors/health/pool/trust/
+  accesslog/admin_*`；`store` 拆为 `persist/accounts/keys/logs`；
+  合并 `firstNonEmpty` / `firstNonEmptyStr` / `firstString` 三个重复实现。
+- CI 新增覆盖率门槛 `scripts/coverage-gate.sh`（server ≥55%、doubao ≥32%、
+  store ≥90%、account ≥90%）与 `FuzzReadSSE` 冒烟。
+
+### Fixed
+
+- 客户端断开（`context canceled`）被记成 502 失败并计入 `failed_requests`。
+- 业务错误（`campaign not found`）以 502 返回，调用方无法判断「重试无意义」。
+- 换号重试可能连续选中同一个账号（3 个账号实际只用 1 个）。
+- 单账号一次限流后永久排到最后（现在按冷却时间自动恢复）。
+- `tools` / `tool_choice` 被静默丢弃；现在默认返回 422
+  `unsupported_parameter`（`tools_policy=ignore` 可恢复旧行为）。
+- `stats.started_at` 与「本次部署」不符（来自导入的旧状态文件）。
+
+
+### 实测（2026-11-14）
+
+用 `npx lmfpd`（lm.ikale.io 官方 CLI，参考库 70 个模型）对网关做整数指纹检测，
+每个模型 3 样本校准（单样本只给排名，噪声很大）：
+
+| 模型 | 指纹最高匹配 | 置信度 | 结论 |
+| --- | --- | ---: | --- |
+| `deepseek-v4-flash` | deepseek-v4.1-flash-1017 | 99.3% | 名实相符 |
+| `deepseek-v4-pro` | deepseek-v4-pro | 93.0% | 名实相符（此前单样本“结果分散”是噪声） |
+| `auto` / `doubao-2.1-lite` / `doubao-2.1-pro` | seed-2.0-lite | 53%–90% | 符合预期（豆包 Seed） |
+| `kimi-k3` / `kimi-k3.1-pro` | seed-2.0-lite | 50% / 98% | **未路由到 Kimi** |
+| `kimi-k3.1-pro-fast` | mimo-v2.6-flash（Seed 并列） | 37% | **未路由到 Kimi** |
+| `glm-5.3` / `glm-5.3-flash` | seed-2.0-lite | 单样本 | **未路由到 GLM** |
+
+同时确认：`Default` / `Profile 2` 对工作模式模型稳定返回 `710022004 rate limited`，
+实际只有 1 个账号在服务；`kimi-*` / `glm-*` 的 `model_item_key` 目前未被上游兑现
+（需在桌面端确认账号权限或实验开关）。详见 `docs/recon.md`「模型指纹实测」。
 
 ## [0.1.3] - 2026-11-14
 

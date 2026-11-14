@@ -14,6 +14,8 @@ package account
 
 import (
 	"maps"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -94,6 +96,13 @@ type Account struct {
 	LastUsed int64  `json:"last_used"`
 	LastErr  string `json:"last_err"`
 	Failures int    `json:"failures"`
+	// CooldownUntil 是失败后的冷却截止时间（Unix 秒）。
+	//
+	// 没有冷却时，一次瞬时限流就会让该账号在池里永远排到最后；
+	// 有冷却时它只是暂时退出轮询，过期后自动恢复，不需要人工清理。
+	CooldownUntil int64 `json:"cooldown_until,omitempty"`
+	// LastSuccess 是最近一次成功调用时间（账号可用性的正向信号）。
+	LastSuccess int64 `json:"last_success,omitempty"`
 
 	// rt 是进程内运行时状态（未导出 → 不落盘），由副本共享。
 	rt *runtime
@@ -289,3 +298,73 @@ func (a *Account) UAValue() string {
 
 // SessionID 返回用于展示/排障的会话标识。
 func (a *Account) SessionID() string { return a.Cookies["sessionid"] }
+
+// --- 凭据生命周期 ---
+
+// sidGuardLayout 说明：`sid_guard` 的常见结构是
+// "<session>|<创建时间戳>|<TTL 秒>|<若干附加段>"。
+//
+// 时间戳可能是秒或毫秒，这里都兼容。网关不主动校验 Cookie 是否仍有效
+// （那需要一次真实请求），只按创建时间 + TTL 推算「最迟可用时间」，
+// 用于控制台与 /health 的到期预警。
+const (
+	sidGuardMinParts = 3
+	msEpochThreshold = 1e12
+)
+
+// SessionExpiry 推算会话 Cookie 的到期时间。
+//
+// 返回 false 表示无法推算（没有 sid_guard，或字段格式不认识）。
+func (a *Account) SessionExpiry() (time.Time, bool) {
+	raw := a.Cookies["sid_guard"]
+	if raw == "" {
+		return time.Time{}, false
+	}
+	parts := strings.Split(raw, "|")
+	if len(parts) < sidGuardMinParts {
+		return time.Time{}, false
+	}
+	created, ok := parseInt64(parts[1])
+	if !ok || created <= 0 {
+		return time.Time{}, false
+	}
+	ttl, ok := parseInt64(parts[2])
+	if !ok || ttl <= 0 {
+		return time.Time{}, false
+	}
+	if created > msEpochThreshold {
+		created /= 1000
+	}
+	return time.Unix(created+ttl, 0), true
+}
+
+// DaysUntilExpiry 返回到期还剩多少天（向上取整；已过期返回负数）。
+func (a *Account) DaysUntilExpiry(now time.Time) (int, bool) {
+	exp, ok := a.SessionExpiry()
+	if !ok {
+		return 0, false
+	}
+	d := exp.Sub(now)
+	// 向上取整：还剩 0.4 天应显示 1 天，而不是 0。
+	days := int(d / (24 * time.Hour))
+	if d%(24*time.Hour) > 0 {
+		days++
+	}
+	return days, true
+}
+
+// parseInt64 解析十进制整数（允许首尾空白与加号）。
+func parseInt64(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	if s[0] == '+' {
+		s = s[1:]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}

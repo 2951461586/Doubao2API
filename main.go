@@ -62,12 +62,21 @@ func main() {
 
 	// 命令行 / 环境变量优先级高于状态文件；设置后立即落盘。
 	if *adminPw != "" {
-		st.UpdateSettings(func(s *store.Settings) { s.AdminPassword = *adminPw })
-		if err := st.Save(); err != nil {
+		if err := st.SetAdminPassword(*adminPw); err != nil {
+			log.Printf("保存管理密码失败: %v", err)
+		} else if err := st.Save(); err != nil {
 			log.Printf("保存管理密码失败: %v", err)
 		} else {
 			log.Printf("已启用管理密码（来自命令行 / DOUBAO_ADMIN_PASSWORD）")
 		}
+	}
+	// 容器部署常用：管理面经反向代理访问，需要显式关掉回环限制。
+	if v := os.Getenv("DOUBAO_ADMIN_LOOPBACK_ONLY"); v != "" {
+		on := v == "1" || strings.EqualFold(v, "true")
+		st.UpdateSettings(func(s *store.Settings) { s.AdminLoopbackOnly = on })
+	}
+	if v := os.Getenv("DOUBAO_TRUSTED_PROXIES"); v != "" {
+		st.UpdateSettings(func(s *store.Settings) { s.TrustedProxies = v })
 	}
 
 	if !*noImport {
@@ -81,6 +90,8 @@ func main() {
 	srv.StartAutoRewards(autoCtx)
 	// 待确认签到的后台复查（默认关闭，开启 retry_pending_checkin 后每小时一次）。
 	srv.StartPendingCheckinRetry(autoCtx)
+	// 合并落盘：请求级状态（账号失败计数、调用统计、密钥用量）不再等到进程退出才写盘。
+	st.StartAutosave(autoCtx, 30*time.Second)
 
 	addr := net.JoinHostPort(*host, fmt.Sprintf("%d", *port))
 	// 启动时就把「对外监听 + 无密钥」这类组合点名，避免误暴露后才被发现。
@@ -92,6 +103,10 @@ func main() {
 		Addr:              addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 20 * time.Second,
+		// 请求体上限在 handler 里用 io.LimitReader 控制；这里只防慢连接。
+		ReadTimeout:    5 * time.Minute,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 		// 流式响应可能持续数分钟，不设 WriteTimeout
 	}
 
@@ -130,10 +145,13 @@ func logSecurityMode(st *store.Store) {
 	default:
 		log.Printf("尚未签发 API 密钥，当前仅允许本机无密钥调用（控制台可创建）")
 	}
-	if st.Settings().AdminPassword != "" {
-		log.Printf("管理接口已启用密码校验（X-Admin-Password / Bearer）")
+	if st.HasAdminPassword() {
+		log.Printf("管理接口已启用密码校验（X-Admin-Password，PBKDF2 哈希存储）")
 	} else {
-		log.Printf("未设置管理密码，管理接口仅允许本机访问（可用 -admin-password 设置）")
+		log.Printf("未设置管理密码：管理接口将拒绝全部请求（可用 -admin-password 或 DOUBAO_ADMIN_PASSWORD 设置）")
+	}
+	if st.HasAdminPassword() && !st.Settings().AdminLoopbackOnly {
+		log.Printf("管理接口允许非本机访问（admin_loopback_only=false），请确认前面有可信代理且已设置可信网段")
 	}
 }
 

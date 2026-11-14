@@ -48,6 +48,22 @@ func serve(s *Server, req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
+// newAdminServer 构造一个「已设置管理密码」的服务（管理面自 v0.2 起必须设密码）。
+func newAdminServer(t *testing.T) *Server {
+	t.Helper()
+	s := newTestServer(t)
+	if err := s.Store.SetAdminPassword("test-pw"); err != nil {
+		t.Fatalf("设置管理密码失败: %v", err)
+	}
+	return s
+}
+
+// serveAdmin 带上管理密码发起请求。
+func serveAdmin(s *Server, req *http.Request) *httptest.ResponseRecorder {
+	req.Header.Set("X-Admin-Password", "test-pw")
+	return serve(s, req)
+}
+
 func addTestAccount(t *testing.T, s *Server, id, session string) *doubao.Account {
 	t.Helper()
 	a := &doubao.Account{
@@ -99,7 +115,7 @@ func TestNoKeyModeLoopbackOnly(t *testing.T) {
 
 func TestAPIKeyEnforcement(t *testing.T) {
 	s := newTestServer(t)
-	k := s.Store.AddKey("test")
+	k, plain := s.Store.AddKey("test")
 
 	cases := []struct {
 		name   string
@@ -108,13 +124,13 @@ func TestAPIKeyEnforcement(t *testing.T) {
 	}{
 		{"无凭据", func(*http.Request) {}, http.StatusUnauthorized},
 		{"Bearer 有效", func(r *http.Request) {
-			r.Header.Set("Authorization", "Bearer "+k.Key)
+			r.Header.Set("Authorization", "Bearer "+plain)
 		}, http.StatusOK},
 		{"x-api-key 有效", func(r *http.Request) {
-			r.Header.Set("x-api-key", k.Key)
+			r.Header.Set("x-api-key", plain)
 		}, http.StatusOK},
 		{"裸密钥", func(r *http.Request) {
-			r.Header.Set("Authorization", k.Key)
+			r.Header.Set("Authorization", plain)
 		}, http.StatusOK},
 		{"错误密钥", func(r *http.Request) {
 			r.Header.Set("Authorization", "Bearer sk-wrong")
@@ -135,18 +151,20 @@ func TestAPIKeyEnforcement(t *testing.T) {
 		t.Errorf("远端无密钥应 401，实际 %d", rec.Code)
 	}
 
-	// 管理密码可代用为调用凭据（控制台便利）。
-	s.Store.UpdateSettings(func(st *store.Settings) { st.AdminPassword = "pw-123" })
+	// 管理密码不得代用为调用凭据：管理面与数据面必须彻底分开。
+	if err := s.Store.SetAdminPassword("pw-123"); err != nil {
+		t.Fatalf("SetAdminPassword: %v", err)
+	}
 	req := newReq("GET", "/v1/models", "", loopbackAddr)
 	req.Header.Set("Authorization", "Bearer pw-123")
-	if rec := serve(s, req); rec.Code != http.StatusOK {
-		t.Errorf("管理密码应可用于 /v1/*，实际 %d", rec.Code)
+	if rec := serve(s, req); rec.Code != http.StatusUnauthorized {
+		t.Errorf("管理密码不应能调用 /v1/*，实际 %d", rec.Code)
 	}
 
 	// 停用后即使带对密钥也拒绝。
-	s.Store.ToggleKey(k.Key)
+	s.Store.ToggleKey(k.ID)
 	req = newReq("GET", "/v1/models", "", loopbackAddr)
-	req.Header.Set("Authorization", "Bearer "+k.Key)
+	req.Header.Set("Authorization", "Bearer "+plain)
 	if rec := serve(s, req); rec.Code != http.StatusUnauthorized {
 		t.Errorf("停用密钥应 401，实际 %d", rec.Code)
 	}
@@ -155,67 +173,87 @@ func TestAPIKeyEnforcement(t *testing.T) {
 func TestAdminAuth(t *testing.T) {
 	s := newTestServer(t)
 
-	if rec := serve(s, newReq("GET", "/admin/api/stats", "", loopbackAddr)); rec.Code != http.StatusOK {
-		t.Fatalf("未设密码时本机应可访问，实际 %d", rec.Code)
-	}
-	if rec := serve(s, newReq("GET", "/admin/api/stats", "", remoteAddr)); rec.Code != http.StatusForbidden {
-		t.Fatalf("未设密码时远端应 403，实际 %d", rec.Code)
+	// 未设置管理密码：管理面一律拒绝（不再有「本机可裸奔」的退路）。
+	if rec := serve(s, newReq("GET", "/admin/api/stats", "", loopbackAddr)); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("未设密码时管理面应 503，实际 %d", rec.Code)
 	}
 
-	s.Store.UpdateSettings(func(st *store.Settings) { st.AdminPassword = "s3cret" })
-	if rec := serve(s, newReq("GET", "/admin/api/stats", "", remoteAddr)); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("设密码后无凭据应 401，实际 %d", rec.Code)
+	if err := s.Store.SetAdminPassword("s3cret"); err != nil {
+		t.Fatalf("SetAdminPassword: %v", err)
 	}
 	if rec := serve(s, newReq("GET", "/admin/api/stats", "", loopbackAddr)); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("设密码后本机也需要密码，实际 %d", rec.Code)
+	}
+	if rec := serve(s, newReq("GET", "/admin/api/stats", "", remoteAddr)); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin_loopback_only 默认开启时远端应 403，实际 %d", rec.Code)
 	}
 
 	for name, set := range map[string]func(*http.Request){
 		"X-Admin-Password": func(r *http.Request) { r.Header.Set("X-Admin-Password", "s3cret") },
 		"Bearer":           func(r *http.Request) { r.Header.Set("Authorization", "Bearer s3cret") },
 	} {
-		req := newReq("GET", "/admin/api/stats", "", remoteAddr)
+		req := newReq("GET", "/admin/api/stats", "", loopbackAddr)
 		set(req)
 		if rec := serve(s, req); rec.Code != http.StatusOK {
 			t.Errorf("%s 方式应通过，实际 %d", name, rec.Code)
 		}
 	}
 
+	// 关闭回环限制后远端可凭密码访问（容器 / 反向代理场景）。
+	s.Store.UpdateSettings(func(st *store.Settings) { st.AdminLoopbackOnly = false })
 	req := newReq("GET", "/admin/api/stats", "", remoteAddr)
+	req.Header.Set("X-Admin-Password", "s3cret")
+	if rec := serve(s, req); rec.Code != http.StatusOK {
+		t.Errorf("关闭回环限制后远端带密码应通过，实际 %d", rec.Code)
+	}
+
+	req = newReq("GET", "/admin/api/stats", "", remoteAddr)
 	req.Header.Set("X-Admin-Password", "wrong")
 	if rec := serve(s, req); rec.Code != http.StatusUnauthorized {
 		t.Errorf("错误密码应 401，实际 %d", rec.Code)
 	}
+
+	// 连续失败 5 次后锁定为 429（按来源 IP）。
+	for i := 0; i < adminMaxFailures; i++ {
+		req := newReq("GET", "/admin/api/stats", "", "198.51.100.7:9000")
+		req.Header.Set("X-Admin-Password", "wrong")
+		serve(s, req)
+	}
+	req = newReq("GET", "/admin/api/stats", "", "198.51.100.7:9000")
+	req.Header.Set("X-Admin-Password", "s3cret")
+	if rec := serve(s, req); rec.Code != http.StatusTooManyRequests {
+		t.Errorf("连续失败后应 429，实际 %d", rec.Code)
+	}
 }
 
 func TestAdminWriteSameOrigin(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 	body := `{"log_keep":200}`
 
 	// 非浏览器客户端（无 Origin）直接放行。
 	req := newReq("POST", "/admin/api/settings", body, loopbackAddr)
-	if rec := serve(s, req); rec.Code != http.StatusOK {
+	if rec := serveAdmin(s, req); rec.Code != http.StatusOK {
 		t.Fatalf("无 Origin 的写操作应放行，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 同源放行。
 	req = newReq("POST", "/admin/api/settings", body, loopbackAddr)
 	req.Header.Set("Origin", "http://"+req.Host)
-	if rec := serve(s, req); rec.Code != http.StatusOK {
+	if rec := serveAdmin(s, req); rec.Code != http.StatusOK {
 		t.Errorf("同源写操作应放行，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 跨站阻断（CSRF）。
 	req = newReq("POST", "/admin/api/settings", body, loopbackAddr)
 	req.Header.Set("Origin", "http://evil.example")
-	if rec := serve(s, req); rec.Code != http.StatusForbidden {
+	if rec := serveAdmin(s, req); rec.Code != http.StatusForbidden {
 		t.Errorf("跨站写操作应 403，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 
 	// 只读请求不做同源校验。
 	req = newReq("GET", "/admin/api/stats", "", loopbackAddr)
 	req.Header.Set("Origin", "http://evil.example")
-	if rec := serve(s, req); rec.Code != http.StatusOK {
+	if rec := serveAdmin(s, req); rec.Code != http.StatusOK {
 		t.Errorf("GET 不做同源校验，实际 %d", rec.Code)
 	}
 }
@@ -402,12 +440,12 @@ func TestHandleRoot(t *testing.T) {
 // --- 控制台 API ---
 
 func TestAdminStateRedactsSecrets(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 	const session = "abcdefghijklmnopqrstuvwxyz0123456789"
 	addTestAccount(t, s, "a1", session)
-	k := s.Store.AddKey("console")
+	_, plain := s.Store.AddKey("console")
 
-	rec := serve(s, newReq("GET", "/admin/api/state", "", loopbackAddr))
+	rec := serveAdmin(s, newReq("GET", "/admin/api/state", "", loopbackAddr))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态接口失败: %d", rec.Code)
 	}
@@ -415,7 +453,7 @@ func TestAdminStateRedactsSecrets(t *testing.T) {
 	if strings.Contains(body, session) {
 		t.Error("状态接口绝不能下发明文会话 Cookie")
 	}
-	if strings.Contains(body, k.Key) {
+	if strings.Contains(body, plain) {
 		t.Error("状态接口绝不能下发明文 API 密钥")
 	}
 
@@ -445,9 +483,9 @@ func TestAdminStateRedactsSecrets(t *testing.T) {
 }
 
 func TestAdminKeysCRUD(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 
-	rec := serve(s, newReq("POST", "/admin/api/keys", `{"name":"ci"}`, loopbackAddr))
+	rec := serveAdmin(s, newReq("POST", "/admin/api/keys", `{"name":"ci"}`, loopbackAddr))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("创建密钥失败: %d: %s", rec.Code, rec.Body.String())
 	}
@@ -457,7 +495,7 @@ func TestAdminKeysCRUD(t *testing.T) {
 	}
 
 	// 列表只回脱敏值。
-	rec = serve(s, newReq("GET", "/admin/api/keys", "", loopbackAddr))
+	rec = serveAdmin(s, newReq("GET", "/admin/api/keys", "", loopbackAddr))
 	if body := rec.Body.String(); strings.Contains(body, full) {
 		t.Error("列表接口不应回传完整密钥")
 	}
@@ -467,7 +505,7 @@ func TestAdminKeysCRUD(t *testing.T) {
 	}
 
 	// 删除：支持用完整密钥或脱敏值定位。
-	rec = serve(s, newReq("DELETE", "/admin/api/keys?key="+mask(full), "", loopbackAddr))
+	rec = serveAdmin(s, newReq("DELETE", "/admin/api/keys?key="+mask(full), "", loopbackAddr))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("删除失败: %d", rec.Code)
 	}
@@ -477,10 +515,10 @@ func TestAdminKeysCRUD(t *testing.T) {
 }
 
 func TestAdminSettingsUpdate(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 
 	body := `{"allow_anonymous":true,"log_keep":20,"cors_origin":"http://127.0.0.1:3000","admin_password":"  pw  "}`
-	rec := serve(s, newReq("POST", "/admin/api/settings", body, loopbackAddr))
+	rec := serveAdmin(s, newReq("POST", "/admin/api/settings", body, loopbackAddr))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("更新设置失败: %d: %s", rec.Code, rec.Body.String())
 	}
@@ -491,12 +529,15 @@ func TestAdminSettingsUpdate(t *testing.T) {
 	if st.LogKeep != 20 || st.CORSOrigin != "http://127.0.0.1:3000" {
 		t.Errorf("设置未更新: %+v", st)
 	}
-	if st.AdminPassword != "pw" {
-		t.Errorf("管理密码应去除首尾空格，实际 %q", st.AdminPassword)
+	if !s.Store.VerifyAdminPassword("pw") {
+		t.Error("管理密码应去除首尾空格后以哈希保存")
+	}
+	if st.AdminPasswordHash == "" || st.AdminPasswordLegacy != "" {
+		t.Error("管理密码不得以明文形式留在设置里")
 	}
 
 	// GET 返回脱敏设置。
-	rec = serve(s, newReq("GET", "/admin/api/settings", "", loopbackAddr))
+	rec = serveAdmin(s, newReq("GET", "/admin/api/settings", "", loopbackAddr))
 	// 设置了密码后需要带密码。
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("设置密码后 GET 也应鉴权，实际 %d", rec.Code)
@@ -514,10 +555,10 @@ func TestAdminSettingsUpdate(t *testing.T) {
 }
 
 func TestAdminAccountsManualAndRemove(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 	cookies := "sessionid=abc123456789; ttwid=tt-1; passport_csrf_token=csrf-1"
 
-	rec := serve(s, newReq("POST", "/admin/api/accounts",
+	rec := serveAdmin(s, newReq("POST", "/admin/api/accounts",
 		`{"action":"manual","name":"手工","cookies":"`+cookies+`","device_id":"dev-9"}`, loopbackAddr))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("手工录入失败: %d: %s", rec.Code, rec.Body.String())
@@ -536,7 +577,7 @@ func TestAdminAccountsManualAndRemove(t *testing.T) {
 	}
 
 	// 同 sessionid 再次录入应为更新。
-	out = decode(t, serve(s, newReq("POST", "/admin/api/accounts",
+	out = decode(t, serveAdmin(s, newReq("POST", "/admin/api/accounts",
 		`{"action":"manual","name":"改名","cookies":"`+cookies+`"}`, loopbackAddr)))
 	if out["new"] != false {
 		t.Error("重复录入应标记 new=false")
@@ -546,7 +587,7 @@ func TestAdminAccountsManualAndRemove(t *testing.T) {
 	}
 
 	// 删除。
-	out = decode(t, serve(s, newReq("POST", "/admin/api/accounts",
+	out = decode(t, serveAdmin(s, newReq("POST", "/admin/api/accounts",
 		`{"action":"remove","id":"`+id+`"}`, loopbackAddr)))
 	if out["ok"] != true {
 		t.Errorf("删除应返回 ok=true，实际 %v", out)
@@ -556,24 +597,24 @@ func TestAdminAccountsManualAndRemove(t *testing.T) {
 	}
 
 	// 未知操作。
-	rec = serve(s, newReq("POST", "/admin/api/accounts", `{"action":"nope"}`, loopbackAddr))
+	rec = serveAdmin(s, newReq("POST", "/admin/api/accounts", `{"action":"nope"}`, loopbackAddr))
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("未知操作应 400，实际 %d", rec.Code)
 	}
 
 	// 错误方法。
-	rec = serve(s, newReq("GET", "/admin/api/accounts", "", loopbackAddr))
+	rec = serveAdmin(s, newReq("GET", "/admin/api/accounts", "", loopbackAddr))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET 应 405，实际 %d", rec.Code)
 	}
 }
 
 func TestAdminLogsAndStats(t *testing.T) {
-	s := newTestServer(t)
+	s := newAdminServer(t)
 	s.Store.Record(store.LogEntry{Status: 200, Model: "doubao"}, 10)
 	s.Store.Record(store.LogEntry{Status: 502, Err: "boom"}, 0)
 
-	out := decode(t, serve(s, newReq("GET", "/admin/api/logs?limit=1", "", loopbackAddr)))
+	out := decode(t, serveAdmin(s, newReq("GET", "/admin/api/logs?limit=1", "", loopbackAddr)))
 	logs, _ := out["logs"].([]any)
 	if len(logs) != 1 {
 		t.Fatalf("limit 未生效，实际 %d 条", len(logs))
@@ -582,16 +623,16 @@ func TestAdminLogsAndStats(t *testing.T) {
 		t.Errorf("应返回最新一条日志，实际 %v", logs[0])
 	}
 
-	stats := decode(t, serve(s, newReq("GET", "/admin/api/stats", "", loopbackAddr)))
+	stats := decode(t, serveAdmin(s, newReq("GET", "/admin/api/stats", "", loopbackAddr)))
 	if stats["total_requests"] != float64(2) || stats["failed_requests"] != float64(1) {
 		t.Errorf("统计不对: %v", stats)
 	}
 
-	serve(s, newReq("DELETE", "/admin/api/logs", "", loopbackAddr))
+	serveAdmin(s, newReq("DELETE", "/admin/api/logs", "", loopbackAddr))
 	if got := len(s.Store.Logs(0)); got != 0 {
 		t.Errorf("清空日志后仍有 %d 条", got)
 	}
-	serve(s, newReq("DELETE", "/admin/api/stats", "", loopbackAddr))
+	serveAdmin(s, newReq("DELETE", "/admin/api/stats", "", loopbackAddr))
 	if got := s.Store.Stats().TotalRequests; got != 0 {
 		t.Errorf("重置统计后 TotalRequests = %d", got)
 	}
@@ -681,24 +722,34 @@ func TestExtractKey(t *testing.T) {
 
 func TestResolveKeyRef(t *testing.T) {
 	s := newTestServer(t)
-	k := s.Store.AddKey("ref")
+	k, plain := s.Store.AddKey("ref")
 
-	if got := s.resolveKeyRef(k.Key); got != k.Key {
-		t.Errorf("完整密钥应解析成功，实际 %q", got)
+	if got := s.resolveKeyRef(k.ID); got != k.ID {
+		t.Errorf("ID 应直接命中，实际 %q", got)
 	}
-	if got := s.resolveKeyRef(mask(k.Key)); got != k.Key {
-		t.Errorf("脱敏密钥应解析成功，实际 %q", got)
+	if got := s.resolveKeyRef(k.Display); got != k.ID {
+		t.Errorf("展示片段应解析为 ID，实际 %q", got)
+	}
+	if got := s.resolveKeyRef(plain); got != k.ID {
+		t.Errorf("明文密钥应解析为 ID，实际 %q", got)
 	}
 	if got := s.resolveKeyRef("sk-nope"); got != "sk-nope" {
 		t.Errorf("未知引用应原样透传（删除 / 停用时自然成为空操作），实际 %q", got)
 	}
 }
 
-func TestStatusOf(t *testing.T) {
-	if got := statusOf(nil); got != http.StatusOK {
-		t.Errorf("statusOf(nil) = %d, want 200", got)
+func TestClassifyStatus(t *testing.T) {
+	checks := map[doubao.Kind]int{
+		doubao.KindOK:        http.StatusOK,
+		doubao.KindBusiness:  http.StatusUnprocessableEntity,
+		doubao.KindAccount:   http.StatusBadGateway,
+		doubao.KindTimeout:   http.StatusGatewayTimeout,
+		doubao.KindCanceled:  499,
+		doubao.KindTransport: http.StatusBadGateway,
 	}
-	if got := statusOf(io.EOF); got != http.StatusBadGateway {
-		t.Errorf("statusOf(err) = %d, want 502", got)
+	for k, want := range checks {
+		if got := k.HTTPStatus(); got != want {
+			t.Errorf("%s.HTTPStatus() = %d, want %d", k, got, want)
+		}
 	}
 }

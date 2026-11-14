@@ -249,7 +249,7 @@ func (s *Server) retryPendingCheckinsWith(ctx context.Context, do checkinFn) {
 			log.Printf("签到复查失败 %s: %v（第 %d 次）", a.Name, err, a.PendingCheckinTries+1)
 			s.Store.RecordCheckinRetry(a.ID, today)
 		case res.CheckedIn && !res.Pending:
-			date := firstNonEmptyStr(res.CheckinDate, today)
+			date := firstNonEmpty(res.CheckinDate, today)
 			s.Store.MarkCheckin(a.ID, date, res.RewardAmount)
 			s.Store.ClearCheckinPending(a.ID)
 			log.Printf("签到已确认 %s: %s +%d（连续 %d 天）", a.Name, date, res.RewardAmount, res.ContinuousDays)
@@ -260,16 +260,6 @@ func (s *Server) retryPendingCheckinsWith(ctx context.Context, do checkinFn) {
 		}
 		_ = s.Store.Save()
 	}
-}
-
-// firstNonEmptyStr 返回第一个非空字符串。
-func firstNonEmptyStr(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // handleAdminCheckinRetry 立即执行一次「待确认签到」的复查队列。

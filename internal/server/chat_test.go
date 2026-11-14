@@ -433,11 +433,16 @@ func TestChatBlockingUpstreamBusinessError(t *testing.T) {
 	fake.install(s)
 
 	rec := serve(s, newReq("POST", "/v1/chat/completions", chatBody(t, false, "doubao", "hi"), loopbackAddr))
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("状态码 = %d, want 502: %s", rec.Code, rec.Body.String())
+	// 业务 / 配置类错误不是网关故障：返回 422 与 business_error，
+	// 调用方据此判断「重试无意义」，而不是把 502 当成上游抖动。
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("状态码 = %d, want 422: %s", rec.Code, rec.Body.String())
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "campaign not found") {
 		t.Errorf("错误体 = %s", body)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "business_error") {
+		t.Errorf("错误类型应为 business_error: %s", body)
 	}
 	if chat, _ := fake.calls(); chat != 1 {
 		t.Errorf("业务错误不应换号重试，上游调用次数 = %d", chat)
@@ -447,9 +452,38 @@ func TestChatBlockingUpstreamBusinessError(t *testing.T) {
 			t.Errorf("业务错误不该标红账号: %s status=%s failures=%d", a.ID, a.Status, a.Failures)
 		}
 	}
+	// 日志要能区分业务错误与真实故障。
+	if logs := s.Store.Logs(0); len(logs) != 1 || logs[0].Kind != "business" {
+		t.Errorf("日志分类不符: %+v", logs)
+	}
+	stats := s.Store.Stats()
+	if stats.FailedRequests != 0 || stats.BusinessErrors != 1 {
+		t.Errorf("业务错误不应计入 FailedRequests: %+v", stats)
+	}
 }
 
-// 流式路径在写完响应头之后才拿到错误：必须下发结构化 error 帧
+// 上游在提交响应头之前就返回业务错误：应返回普通 JSON（真实状态码），
+// 而不是「200 + 一个多数 SDK 不解析的 error 帧」。
+func TestChatStreamPreflightErrorReturnsJSON(t *testing.T) {
+	s := newTestServer(t)
+	addTestAccount(t, s, "a1", "s1")
+	fake := newFakeDoubao(t)
+	fake.handler = func(w http.ResponseWriter, _ int) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":2,"msg":"campaign not found"}`)
+	}
+	fake.install(s)
+
+	rec := serve(s, newReq("POST", "/v1/chat/completions", chatBody(t, true, "doubao", "hi"), loopbackAddr))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("提交前错误应返回 422，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Errorf("未提交时不应回退成 SSE: %s", ct)
+	}
+}
+
+// 上游已经产出正文之后才报错：响应头已提交，只能下发结构化 error 帧
 // （finish_reason=error + 顶层 error 字段），不能把错误文案当成正文，
 // 否则 OpenAI SDK 会当正常回复收下。
 func TestChatStreamUpstreamErrorIsStructured(t *testing.T) {
@@ -457,8 +491,7 @@ func TestChatStreamUpstreamErrorIsStructured(t *testing.T) {
 	addTestAccount(t, s, "a1", "s1")
 	fake := newFakeDoubao(t)
 	fake.handler = func(w http.ResponseWriter, _ int) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"code":2,"msg":"campaign not found"}`)
+		writeSSE(w, sseEvent("STREAM_CHUNK", `{"patch_op":[{"patch_value":{"content_block":[{"block_type":10000,"content":{"text_block":{"text":"半句"}}}]}}]}`))
 	}
 	fake.install(s)
 
@@ -473,47 +506,8 @@ func TestChatStreamUpstreamErrorIsStructured(t *testing.T) {
 	if !strings.HasSuffix(body, "data: [DONE]"+"\n\n") {
 		t.Errorf("流式错误后仍应以 [DONE] 收尾: %s", body)
 	}
-
-	frames := splitFrames(t, body)
-	var errFrame map[string]any
-	for _, fr := range frames {
-		if fr.data == "" || fr.data == "[DONE]" {
-			continue
-		}
-		m := frameJSON(t, fr)
-		if e, ok := m["error"].(map[string]any); ok {
-			errFrame = m
-			if e["type"] != "upstream_error" || !strings.Contains(e["message"].(string), "campaign not found") {
-				t.Errorf("error 字段不符: %+v", e)
-			}
-		}
-	}
-	if errFrame == nil {
-		t.Fatalf("缺少结构化 error 帧: %s", body)
-	}
-	// 错误帧本身也要带 finish_reason=error，且不再有 finish_reason=stop。
-	choices, _ := errFrame["choices"].([]any)
-	ch, _ := choices[0].(map[string]any)
-	if ch["finish_reason"] != "error" {
-		t.Errorf("错误帧 finish_reason = %v, want error", ch["finish_reason"])
-	}
-	for _, fr := range frames {
-		if fr.data == "" || fr.data == "[DONE]" {
-			continue
-		}
-		if d, ok := deltaOf(t, fr)["content"].(string); ok && d != "" {
-			t.Errorf("错误流不应包含正文增量: %q", d)
-		}
-		if c, ok := frameJSON(t, fr)["choices"].([]any); ok && len(c) > 0 {
-			cc, _ := c[0].(map[string]any)
-			if cc["finish_reason"] == "stop" {
-				t.Errorf("错误流不应以 finish_reason=stop 收尾: %s", fr.data)
-			}
-		}
-	}
-
-	if logs := s.Store.Logs(0); len(logs) != 1 || logs[0].Err == "" || logs[0].Status != http.StatusBadGateway {
-		t.Errorf("流式错误日志不符: %+v", logs)
+	if !strings.Contains(body, `"content":"半句"`) {
+		t.Errorf("已产出的正文应保留: %s", body)
 	}
 }
 

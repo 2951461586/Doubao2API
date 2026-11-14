@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,11 +51,18 @@ func (c *Client) NonJSONEvents() int64 { return c.stats.NonJSONEvents.Load() }
 func NewClient() *Client {
 	return &Client{
 		HTTP: &http.Client{
-			// 流式请求不做整体超时，靠 ctx 控制
+			// 流式请求不做整体超时，靠 ctx 控制；但建连阶段必须有上限，
+			// 否则一个黑洞地址会让请求一直占着连接直到总预算耗尽。
 			Transport: &http.Transport{
-				MaxIdleConns:        64,
-				MaxIdleConnsPerHost: 32,
-				IdleConnTimeout:     90 * time.Second,
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:          64,
+				MaxIdleConnsPerHost:   32,
+				MaxConnsPerHost:       64,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 60 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ForceAttemptHTTP2:     true,
 			},
 		},
 	}
@@ -461,7 +469,7 @@ func (c *Client) ChatStream(ctx context.Context, a *Account, req ChatRequest, on
 		}
 		lastErr = err
 		// 已输出内容则不再重试，避免重复；非鉴权错误也不重试。
-		if emitted || !looksLikeAuthError(err.Error()) {
+		if emitted || !IsAuthError(err.Error()) {
 			return err
 		}
 	}

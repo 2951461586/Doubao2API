@@ -175,6 +175,7 @@
           <div class="actions"><button class="btn" id="refreshAll">刷新全部</button></div>
         </div>
         <div class="cards" id="kpis"></div>
+        <div id="healthWarn" class="hint" style="display:none"></div>
         <div class="panel">
           <div class="panel-head"><h2>运行状态</h2><div class="actions"><span id="runtimeMeta" class="muted mono"></span></div></div>
           <div class="panel-body"><div class="kv" id="runtimeBody"></div></div>
@@ -303,8 +304,18 @@
             <div><label>请求超时（秒）</label><input id="sTimeout" type="number" min="1"></div>
             <div><label>最大重试次数</label><input id="sRetries" type="number" min="1"></div>
             <div><label>日志保留条数</label><input id="sLogKeep" type="number" min="1"></div>
+            <div><label>总预算（秒，含重试）</label><input id="sOverall" type="number" min="1"></div>
+            <div><label>单账号并发上限</label><input id="sConcurrency" type="number" min="0"></div>
+            <div><label>按密钥限流（次/分钟，0=不限）</label><input id="sRateLimit" type="number" min="0"></div>
+            <div><label>Cookie 到期预警（天）</label><input id="sWarnDays" type="number" min="1"></div>
             <div><label>CORS 允许来源（逗号分隔，留空=仅本机）</label><input id="sCors" placeholder="http://192.168.1.10:8080"></div>
+            <div><label>可信代理网段（CIDR，逗号分隔）</label><input id="sProxies" placeholder="172.17.0.0/16"></div>
+            <div><label>工具字段策略（tools）</label>
+              <select id="sTools"><option value="reject">拒绝（422，推荐）</option><option value="ignore">忽略</option></select></div>
+            <div><label>管理面来源</label>
+              <label class="row" style="margin:0"><input type="checkbox" id="sLoopback"> 仅允许本机直连（admin_loopback_only）</label></div>
           </div>
+          <div class="hint">容器 / 反向代理部署时需要关闭「仅本机直连」，并填写可信代理网段；否则管理接口不可达，且带 X-Forwarded-For 的请求不会被当作本机。</div>
         </div></div>
         <div class="panel"><div class="panel-head"><h2>自动任务</h2></div><div class="panel-body">
           <div class="row">
@@ -321,7 +332,7 @@
           <textarea id="sAliases" spellcheck="false"></textarea>
         </div></div>
         <div class="panel"><div class="panel-head"><h2>管理密码</h2></div><div class="panel-body">
-          <label>留空表示不修改；设置后管理接口与 /v1/* 均可使用该密码</label>
+          <label>留空表示不修改；密码只保存 PBKDF2 哈希，且仅用于管理接口（不能调用 /v1/*）</label>
           <input id="sPw" type="password" class="w-260" placeholder="不修改请留空">
         </div></div>
       </section>
@@ -364,6 +375,11 @@
         }
         return j;
       });
+    }).catch(function(e){
+      // 管理面未启用 / 被限流时给出明确下一步，而不是只弹原始错误。
+      if (e.status === 503) toast("管理接口未启用：请用 DOUBAO_ADMIN_PASSWORD 设置管理密码后重启", "err");
+      else if (e.status === 429) toast("尝试过于频繁，请稍后再试", "err");
+      throw e;
     });
   }
   function el(tag, cls, text){
@@ -433,9 +449,11 @@
   }
   function loadHealth(){
     fetch("/health").then(function(r){ return r.json(); }).then(function(h){
+      S.health = h;
       var ready = h.ready || 0, total = h.accounts || 0;
       setHealth(total > 0 && ready > 0 ? "ok" : (total === 0 ? "warn" : "err"),
         "账号 " + ready + "/" + total + " 就绪 · 模型 " + (h.models||0));
+      if (S.state) renderWarnings();
     }).catch(function(){ setHealth("err", "不可达"); });
   }
   function loadMeta(){
@@ -454,9 +472,11 @@
       ["账号（就绪/总）", ready + " / " + accts.length, "上游凭据池"],
       ["API 密钥", (d.keys||[]).length, "未签发时允许裸调"],
       ["总请求", fmtNum(s.total_requests||0), "网关累计"],
-      ["失败请求", fmtNum(s.failed_requests||0), "含上游错误"],
+      ["失败请求", fmtNum(s.failed_requests||0), "仅上游故障"],
+      ["客户端断开", fmtNum(s.canceled_requests||0), "不计入失败"],
+      ["业务错误", fmtNum(s.business_errors||0), "上游业务/配置"],
       ["输出字符", fmtNum(s.total_chars_out||0), "累计"],
-      ["启动时间", fmtTime(s.started_at), "进程启动"]
+      ["本次启动", fmtTime((d.meta||{}).booted_at || s.started_at), "进程启动"]
     ];
     var box = $("#kpis"); box.textContent = "";
     kpis.forEach(function(k){
@@ -466,7 +486,22 @@
       c.appendChild(el("div", "s", k[2]));
       box.appendChild(c);
     });
+    renderWarnings(d);
     renderRuntime();
+  }
+  // renderWarnings 把 /health 的告警转成顶部提示条。
+  function renderWarnings(d){
+    var box = $("#healthWarn"); if (!box) return;
+    var warns = (S.health && S.health.warnings) || [];
+    if (!warns.length) { box.style.display = "none"; box.textContent = ""; return; }
+    box.style.display = "";
+    box.textContent = "";
+    warns.forEach(function(w){
+      var line = el("div", "row");
+      line.appendChild(pill(w.code, "warn"));
+      line.appendChild(el("span", "", w.message || ""));
+      box.appendChild(line);
+    });
   }
   function renderRuntime(){
     var body = $("#runtimeBody"); if (!body) return;
@@ -534,7 +569,7 @@
       ops.appendChild(group);
       var r = row([
         cell(a.name), cell(a.source || "—", "muted"), cell(a.session || "—", "mono"), st,
-        cell(a.device_id || "—", "mono"), cell(a.last_checkin_date || "—", "mono"),
+        expiryCell(a), cell(a.last_checkin_date || "—", "mono"),
         pendingCheckinCell(a),
         cell(a.failures || 0, "mono"), cell(fmtTime(a.last_used), "muted"), ops
       ]);
@@ -558,6 +593,21 @@
       "\n开启「待确认签到每小时复查」后会自动补写签到结果";
     return td;
   }
+  // expiryCell 渲染凭据剩余有效期（来自 sid_guard 推算）。
+  function expiryCell(a){
+    var td = el("td");
+    if (a.session_days_left === undefined) { td.className = "muted"; td.textContent = "—"; return td; }
+    var d = a.session_days_left;
+    if (d < 0) { td.appendChild(pill("已过期", "err")); }
+    else if (d <= 7) { td.appendChild(pill("剩 " + d + " 天", "warn")); }
+    else { td.appendChild(pill("剩 " + d + " 天", "ok")); }
+    if (a.session_expires_at) td.title = "按 sid_guard 推算：" + fmtTime(a.session_expires_at);
+    if (a.cooldown_until && a.cooldown_until * 1000 > Date.now()) {
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(pill("冷却中", "warn"));
+    }
+    return td;
+  }
   function renderKeys(d){
     var tb = $("#keys"); tb.textContent = "";
     var keys = d.keys || [];
@@ -565,20 +615,29 @@
     keys.forEach(function(k){
       var st = el("td"); st.appendChild(pill(k.enabled ? "启用" : "停用", k.enabled ? "ok" : ""));
       var ops = el("td"); var g = el("span", "row tight");
-      g.appendChild(btn(k.enabled ? "停用" : "启用", "sm", function(){ keyOp("toggle", k.key); }));
-      g.appendChild(btn("删除", "sm danger", function(){ if (confirm("确定删除该密钥？")) keyOp("key", k.key); }));
+      g.appendChild(btn(k.enabled ? "停用" : "启用", "sm", function(){ keyOp("toggle", k.id); }));
+      g.appendChild(btn("删除", "sm danger", function(){ if (confirm("确定删除该密钥？")) keyOp("id", k.id); }));
       ops.appendChild(g);
+      var nameCell = cell(k.name || "—");
+      nameCell.title = "id: " + (k.id || "—");
       tb.appendChild(row([
-        cell(k.key, "mono"), cell(k.name || "—"), st, cell(k.requests || 0, "mono"),
+        cell(k.key, "mono"), nameCell, st, cell(k.requests || 0, "mono"),
         cell(fmtTime(k.created_at), "muted"), cell(fmtTime(k.last_used), "muted"), ops
       ]));
     });
   }
   function renderSettings(st){
     $("#sTimeout").value = st.request_timeout_sec || 300;
+    $("#sOverall").value = st.overall_timeout_sec || 600;
     $("#sRetries").value = st.max_retries || 3;
     $("#sLogKeep").value = st.log_keep || 500;
     $("#sCors").value = st.cors_origin || "";
+    $("#sProxies").value = st.trusted_proxies || "";
+    $("#sLoopback").checked = st.admin_loopback_only !== false;
+    $("#sWarnDays").value = st.session_warn_days || 14;
+    $("#sConcurrency").value = st.max_concurrent_per_account || 0;
+    $("#sRateLimit").value = st.rate_limit_per_key || 0;
+    $("#sTools").value = st.tools_policy || "reject";
     $("#sAliases").value = JSON.stringify(st.model_aliases || {}, null, 2);
     $("#sAutoCheckin").checked = !!st.auto_checkin;
     $("#sAutoClaim").checked = !!st.auto_claim_tasks;
@@ -887,9 +946,16 @@
     catch(e){ toast("模型别名不是合法 JSON", "err"); return; }
     var body = {
       request_timeout_sec: parseInt($("#sTimeout").value,10) || 300,
+      overall_timeout_sec: parseInt($("#sOverall").value,10) || 600,
       max_retries: parseInt($("#sRetries").value,10) || 3,
       log_keep: parseInt($("#sLogKeep").value,10) || 500,
       cors_origin: $("#sCors").value.trim(),
+      trusted_proxies: $("#sProxies").value.trim(),
+      admin_loopback_only: $("#sLoopback").checked,
+      session_warn_days: parseInt($("#sWarnDays").value,10) || 14,
+      max_concurrent_per_account: parseInt($("#sConcurrency").value,10) || 0,
+      rate_limit_per_key: parseInt($("#sRateLimit").value,10) || 0,
+      tools_policy: $("#sTools").value,
       model_aliases: aliases,
       auto_checkin: $("#sAutoCheckin").checked,
       auto_claim_tasks: $("#sAutoClaim").checked,

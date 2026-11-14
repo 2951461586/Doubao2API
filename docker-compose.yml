@@ -5,6 +5,11 @@
 #   docker compose logs -f
 #
 # 控制台与 API：http://127.0.0.1:10086/
+#
+# 安全基线（v0.2 起）：
+#   - 管理面必须显式设置 DOUBAO_ADMIN_PASSWORD，否则 /admin/api/* 全部返回 503；
+#   - 容器发布端口固定绑 127.0.0.1；要对外请在前面放带鉴权的反向代理；
+#   - 状态文件含账号 Cookie，备份与导出都按「等同密码」对待。
 
 services:
   doubao2api:
@@ -14,12 +19,13 @@ services:
     restart: unless-stopped
 
     # 默认只绑本机，避免无意暴露到局域网。
-    # 需要局域网访问时改成 "10086:10086"。
+    # 需要局域网访问时改成 "10086:10086"，并同时设置管理密码。
     ports:
       - "127.0.0.1:10086:10086"
 
     volumes:
-      # 状态文件（含账号 Cookie 与 API 密钥）落在这里，等同账号密码，注意保密
+      # 状态文件（含账号 Cookie 与 API 密钥指纹）落在这里，注意保密。
+      # .bak 与 backups/ 由程序自动维护，建议把整个 ./data 一起做异地备份。
       - ./data:/data
 
     environment:
@@ -28,12 +34,34 @@ services:
       DOUBAO_PORT: "10086"
       DOUBAO_DATA_PATH: /data/doubao2api-data.json
       # 管理密码：设置后 /admin/api/* 必须携带 X-Admin-Password 头。
-      # 未设置时管理接口仅允许本机（容器内回环）访问，因此对外暴露时务必设置。
+      # 未设置时管理接口一律拒绝（不再有「本机可裸奔」的退路）。
       DOUBAO_ADMIN_PASSWORD: ${DOUBAO_ADMIN_PASSWORD:-}
+      # 容器内看到的来源 IP 是网桥地址（非 127.0.0.1），因此必须关掉回环限制，
+      # 由管理密码负责鉴权。裸机部署请保持默认（true）。
+      DOUBAO_ADMIN_LOOPBACK_ONLY: "false"
+      # 前面有可信反向代理时填其网段，例如 "172.17.0.0/16"。
+      # 未填写时，任何携带 X-Forwarded-For 的请求都不会被当作本机。
+      DOUBAO_TRUSTED_PROXIES: ${DOUBAO_TRUSTED_PROXIES:-}
 
     # 容器内没有 Windows 桌面端，DPAPI 不可用，因此关闭自动导入；
     # 账号请通过控制台 API 手工录入 Cookie（见 README「Docker 部署」）。
     command: ["-no-import"]
+
+    # 运行时加固：只读根文件系统 + 可写 /tmp + 禁止提权。
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # 日志轮转：避免长期运行时 json-file 无限增长。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:10086/ping"]

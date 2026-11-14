@@ -2,21 +2,38 @@
 package store
 
 import (
+	"doubao2api/internal/account"
+	"doubao2api/internal/ids"
+	"doubao2api/internal/secret"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"doubao2api/internal/account"
-	"doubao2api/internal/ids"
 )
 
+// schemaVersion 是状态文件的结构版本。
+//
+//	1  初版（管理密码与调用密钥明文落盘）
+//	2  管理密码 PBKDF2 哈希、调用密钥只存指纹、新增安全 / 调度设置
+const schemaVersion = 2
+
 // APIKey 是网关对外签发的调用密钥。
+//
+// 状态文件只保存指纹（KeyHash）与展示用片段（Display），完整密钥仅在创建时
+// 返回给调用方一次。此前版本把明文 Key 写进磁盘，一旦状态文件泄露即等同
+// 泄露全部调用凭据。
 type APIKey struct {
-	Key       string `json:"key"`
+	// ID 是稳定句柄：控制台的启停 / 删除按 ID 定位，不再依赖密钥原文。
+	ID string `json:"id"`
+	// KeyHash 是 secret.HashKey 的输出，用于每次请求的常量时间校验。
+	KeyHash string `json:"key_hash"`
+	// Display 是给人看的片段（sk-abc123…wxyz），可用于列表展示与手工引用。
+	Display string `json:"display"`
+	// LegacyKey 只用于读取旧状态文件里的明文密钥并迁移，保存后即清空。
+	LegacyKey string `json:"key,omitempty"`
 	Name      string `json:"name"`
 	Enabled   bool   `json:"enabled"`
 	CreatedAt int64  `json:"created_at"`
@@ -26,12 +43,34 @@ type APIKey struct {
 
 // Settings 是运行期可调参数。
 type Settings struct {
-	ModelAliases   map[string]string `json:"model_aliases"`
-	RequestTimeout int               `json:"request_timeout_sec"`
-	MaxRetries     int               `json:"max_retries"`
-	LogKeep        int               `json:"log_keep"`
-	CORSOrigin     string            `json:"cors_origin"`
-	AdminPassword  string            `json:"admin_password"`
+	ModelAliases map[string]string `json:"model_aliases"`
+	// RequestTimeout 是单次上游尝试的超时。
+	RequestTimeout int `json:"request_timeout_sec"`
+	// OverallTimeout 是一次客户端请求的总预算（含换号重试）。
+	// 没有它时最坏耗时是 RequestTimeout × MaxRetries，客户端往往先超时。
+	OverallTimeout int    `json:"overall_timeout_sec,omitempty"`
+	MaxRetries     int    `json:"max_retries"`
+	LogKeep        int    `json:"log_keep"`
+	CORSOrigin     string `json:"cors_origin"`
+	// AdminPasswordHash 是 PBKDF2 编码后的管理口令，永不下发前端。
+	AdminPasswordHash string `json:"admin_password_hash,omitempty"`
+	// AdminPasswordLegacy 仅用于读取旧状态文件并迁移，保存后即清空。
+	AdminPasswordLegacy string `json:"admin_password,omitempty"`
+	// TrustedProxies 是可信反向代理的网段（CIDR，逗号分隔）。
+	//
+	// 为空时任何携带 X-Forwarded-For / X-Real-IP 的请求都不再被视为本机，
+	// 这是堵住「Funnel / nginx 把 RemoteAddr 变成 127.0.0.1」误放行的方法。
+	TrustedProxies string `json:"trusted_proxies,omitempty"`
+	// AdminLoopbackOnly 为 true 时管理接口只接受本机直连（默认）。
+	AdminLoopbackOnly bool `json:"admin_loopback_only"`
+	// SessionWarnDays 是凭据到期预警阈值（天）。
+	SessionWarnDays int `json:"session_warn_days,omitempty"`
+	// MaxConcurrentPerAccount 限制单账号并发上游请求数。
+	MaxConcurrentPerAccount int `json:"max_concurrent_per_account,omitempty"`
+	// RateLimitPerKey 是每把密钥每分钟的请求上限（0 表示不限）。
+	RateLimitPerKey int `json:"rate_limit_per_key,omitempty"`
+	// ToolsPolicy 决定收到 tools 字段时的行为：reject（默认）/ ignore。
+	ToolsPolicy string `json:"tools_policy,omitempty"`
 	// AutoCheckin 开启后后台每天自动为每个账号签到一次。
 	AutoCheckin bool `json:"auto_checkin,omitempty"`
 	// AutoClaimTasks 开启后后台自动领取「已完成 / 直接领取」的积分任务奖励。
@@ -48,6 +87,8 @@ type Settings struct {
 	//
 	// 默认关闭：无密钥模式仅放行环回来源，避免误绑 0.0.0.0 后裸奔。
 	AllowAnonymous bool `json:"allow_anonymous,omitempty"`
+	// VerboseAccessLog 开启后，控制台轮询与健康检查也写入访问日志。
+	VerboseAccessLog bool `json:"verbose_access_log,omitempty"`
 }
 
 // LogEntry 是一条请求日志（只记元信息，不落对话内容）。
@@ -61,24 +102,43 @@ type LogEntry struct {
 	LatencyMS int64  `json:"latency_ms"`
 	PromptLen int    `json:"prompt_len"`
 	OutputLen int    `json:"output_len"`
-	Err       string `json:"err,omitempty"`
+	// Kind 是本次结果的分类：ok / business / account / timeout / canceled / transport。
+	// 排障时必须能区分「上游挂了」与「客户端先断开」，否则失败率无法解读。
+	Kind string `json:"kind,omitempty"`
+	Err  string `json:"err,omitempty"`
 }
 
 // Stats 是累计统计。
+//
+// FailedRequests 只统计「上游真的失败」；CanceledRequests 单独计数客户端断开，
+// BusinessErrors 统计上游业务 / 配置类错误。三者混在一起时失败率毫无参考价值。
 type Stats struct {
-	TotalRequests  int64 `json:"total_requests"`
-	FailedRequests int64 `json:"failed_requests"`
-	TotalCharsOut  int64 `json:"total_chars_out"`
-	StartedAt      int64 `json:"started_at"`
+	TotalRequests    int64 `json:"total_requests"`
+	FailedRequests   int64 `json:"failed_requests"`
+	CanceledRequests int64 `json:"canceled_requests,omitempty"`
+	BusinessErrors   int64 `json:"business_errors,omitempty"`
+	TotalCharsOut    int64 `json:"total_chars_out"`
+	StartedAt        int64 `json:"started_at"`
+}
+
+// Meta 是状态文件的元信息。
+//
+// StartedAt 容易被误读成「本次部署时间」——它其实来自状态文件首次创建。
+// BootedAt 才是当前进程的启动时间。
+type Meta struct {
+	SchemaVersion int   `json:"schema_version"`
+	CreatedAt     int64 `json:"created_at"`
+	BootedAt      int64 `json:"booted_at"`
 }
 
 // State 是全部持久化状态。
 type State struct {
+	Meta     Meta               `json:"meta"`
 	Accounts []*account.Account `json:"accounts"`
 	Keys     []*APIKey          `json:"keys"`
 	Settings Settings           `json:"settings"`
 	Stats    Stats              `json:"stats"`
-	Logs     []LogEntry         `json:"logs"`
+	Logs     []LogEntry         `json:"logs,omitempty"`
 }
 
 // Store 是带锁的状态容器。
@@ -95,17 +155,37 @@ type Store struct {
 	path   string
 	st     *State
 	rotate int
+
+	// keyStats 是密钥的运行时调用计数，与状态文件解耦：
+	// 每个请求都要累加，不能为此去抢全局写锁。
+	keyStats sync.Map // key ID -> *keyStat
+
+	// dirty 标记「内存里有尚未落盘的变更」，由后台自动保存消费。
+	dirty atomic.Bool
+	// lastSnapshot 是上一次生成时间戳备份的日期（本地时区）。
+	lastSnapshot string
+}
+
+// keyStat 是单把密钥的原子计数。
+type keyStat struct {
+	requests atomic.Int64
+	lastUsed atomic.Int64
 }
 
 // DefaultSettings 返回默认设置。
 func DefaultSettings() Settings {
 	return Settings{
-		ModelAliases:   map[string]string{},
-		RequestTimeout: 300,
-		MaxRetries:     3,
-		LogKeep:        500,
-		// 默认仅放行本机来源；如需局域网访问，在控制台显式配置。
-		CORSOrigin: "",
+		ModelAliases:            map[string]string{},
+		RequestTimeout:          300,
+		OverallTimeout:          600,
+		MaxRetries:              3,
+		LogKeep:                 500,
+		CORSOrigin:              "", // 默认仅放行本机来源；如需局域网访问，在控制台显式配置。
+		AdminLoopbackOnly:       true,
+		SessionWarnDays:         14,
+		MaxConcurrentPerAccount: 2,
+		RateLimitPerKey:         0,
+		ToolsPolicy:             ToolsPolicyReject,
 		// 自动签到 / 自动领取默认关闭，避免未经确认地修改账号额度。
 		AutoCheckin: false,
 		// 待确认签到的后台重试同样默认关闭（属于自动写操作）。
@@ -117,6 +197,17 @@ func DefaultSettings() Settings {
 		AllowAnonymous: false,
 	}
 }
+
+// tools 字段的处理策略。
+const (
+	// ToolsPolicyReject 收到 tools 时返回 422（默认）。
+	//
+	// 静默忽略会让 Agent 类客户端拿到「看起来成功但没调用工具」的结果，
+	// 比显式报错更难排查，因此默认拒绝。
+	ToolsPolicyReject = "reject"
+	// ToolsPolicyIgnore 忽略 tools 字段，按普通对话处理。
+	ToolsPolicyIgnore = "ignore"
+)
 
 // Open 载入（或初始化）状态文件。
 func Open(path string) (*Store, error) {
@@ -135,11 +226,23 @@ func Open(path string) (*Store, error) {
 		if s.st.Settings.RequestTimeout == 0 {
 			s.st.Settings.RequestTimeout = def.RequestTimeout
 		}
+		if s.st.Settings.OverallTimeout == 0 {
+			s.st.Settings.OverallTimeout = def.OverallTimeout
+		}
 		if s.st.Settings.MaxRetries == 0 {
 			s.st.Settings.MaxRetries = def.MaxRetries
 		}
 		if s.st.Settings.LogKeep == 0 {
 			s.st.Settings.LogKeep = def.LogKeep
+		}
+		if s.st.Settings.SessionWarnDays == 0 {
+			s.st.Settings.SessionWarnDays = def.SessionWarnDays
+		}
+		if s.st.Settings.MaxConcurrentPerAccount == 0 {
+			s.st.Settings.MaxConcurrentPerAccount = def.MaxConcurrentPerAccount
+		}
+		if s.st.Settings.ToolsPolicy == "" {
+			s.st.Settings.ToolsPolicy = def.ToolsPolicy
 		}
 		if s.st.Settings.CORSOrigin == "*" {
 			// 历史状态文件里的通配符不再生效，收紧为本机来源。
@@ -147,6 +250,9 @@ func Open(path string) (*Store, error) {
 		}
 		if s.st.Stats.StartedAt == 0 {
 			s.st.Stats.StartedAt = time.Now().Unix()
+		}
+		if err := s.migrateLocked(); err != nil {
+			return nil, err
 		}
 		// 迁移旧版本导入的状态：fp 固定为 verify_<device_id>、补齐 web_tab_id 等。
 		// 规则集中在 account.Normalize，避免与桌面端导入 / 手工录入出现两套逻辑。
@@ -161,444 +267,57 @@ func Open(path string) (*Store, error) {
 	default:
 		return nil, err
 	}
+
+	now := time.Now().Unix()
+	if s.st.Meta.CreatedAt == 0 {
+		s.st.Meta.CreatedAt = s.st.Stats.StartedAt
+	}
+	if s.st.Meta.CreatedAt == 0 {
+		s.st.Meta.CreatedAt = now
+	}
+	s.st.Meta.SchemaVersion = schemaVersion
+	s.st.Meta.BootedAt = now
+
+	// 旧格式的明文密钥：指纹必须由原文算出，因此在这里一次性迁移。
+	// 迁移后 LegacyKey 清空，保存时不会再写出明文。
+	for _, k := range s.st.Keys {
+		if k.ID == "" {
+			k.ID = ids.Hex(8)
+		}
+		if k.KeyHash == "" && k.LegacyKey != "" {
+			k.KeyHash = secret.HashKey(k.LegacyKey)
+			k.Display = MaskKey(k.LegacyKey)
+			k.LegacyKey = ""
+		}
+	}
 	return s, nil
+}
+
+// migrateLocked 把旧版状态迁移到当前 schema。
+//
+// 管理密码：旧版明文 → PBKDF2 哈希。迁移在 Open 内完成，保存后明文字段即清空。
+func (s *Store) migrateLocked() error {
+	set := &s.st.Settings
+	if set.AdminPasswordLegacy != "" {
+		h, err := secret.HashPassword(set.AdminPasswordLegacy)
+		if err != nil {
+			return fmt.Errorf("迁移管理密码失败: %w", err)
+		}
+		set.AdminPasswordHash = h
+		set.AdminPasswordLegacy = ""
+	}
+	if set.AdminPasswordHash == "" && set.AdminPasswordLegacy == "" {
+		set.AdminPasswordHash = ""
+	}
+	return nil
 }
 
 // Path 返回状态文件路径。
 func (s *Store) Path() string { return s.path }
 
-// Save 原子写回状态文件。
-//
-// 持读锁 marshal 是安全的：所有持久化字段的写操作都在写锁内完成，
-// 读取接口返回的是深拷贝，因此这里不会与修改撞车（见 Store 的并发约定）。
-func (s *Store) Save() error {
-	// 串行化落盘，避免自动任务与 HTTP 请求同时写同一个 .tmp 文件。
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-	s.mu.RLock()
-	raw, err := json.MarshalIndent(s.st, "", "  ")
-	s.mu.RUnlock()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return err
-	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.path)
-}
-
-// --- 账号 ---
-
-// Accounts 返回账号快照（深拷贝，调用方可以随意修改）。
-func (s *Store) Accounts() []*account.Account {
+// Meta 返回状态文件元信息（结构版本 / 创建时间 / 本次启动时间）。
+func (s *Store) Meta() Meta {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]*account.Account, 0, len(s.st.Accounts))
-	for _, a := range s.st.Accounts {
-		out = append(out, a.Clone())
-	}
-	return out
-}
-
-// Account 按 ID 查找账号（深拷贝；不存在返回 nil）。
-func (s *Store) Account(id string) *account.Account {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.accountLocked(id).Clone()
-}
-
-// accountLocked 返回内部账号指针；调用方必须已持锁且不得泄漏该指针。
-func (s *Store) accountLocked(id string) *account.Account {
-	for _, a := range s.st.Accounts {
-		if a.ID == id {
-			return a
-		}
-	}
-	return nil
-}
-
-// UpsertAccount 按会话 ID 去重后写入账号；返回是否为新增。
-//
-// 入参会被拷贝一份存储，调用方后续修改自己那份不会影响状态。
-func (s *Store) UpsertAccount(a *account.Account) bool {
-	if a == nil {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := a.Clone()
-	for i, ex := range s.st.Accounts {
-		if ex.SessionID() != "" && ex.SessionID() == cp.SessionID() {
-			cp.ID = ex.ID
-			// 保留调用方传入的运行期缓存（CSRF 等），其余字段整体替换。
-			s.st.Accounts[i] = cp
-			return false
-		}
-	}
-	s.st.Accounts = append(s.st.Accounts, cp)
-	return true
-}
-
-// RemoveAccount 删除账号。
-func (s *Store) RemoveAccount(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, a := range s.st.Accounts {
-		if a.ID == id {
-			s.st.Accounts = append(s.st.Accounts[:i], s.st.Accounts[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// NextAccount 以轮询方式挑一个可用账号。
-//
-// 连续失败过多的账号会被跳过；全部不可用时回退到失败最少的那个，
-// 保证不会硬阻塞请求。
-func (s *Store) NextAccount() *account.Account {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := len(s.st.Accounts)
-	if n == 0 {
-		return nil
-	}
-	var best *account.Account
-	for i := 0; i < n; i++ {
-		idx := (s.rotate + i) % n
-		a := s.st.Accounts[idx]
-		if !a.Enabled {
-			continue
-		}
-		if best == nil || a.Failures < best.Failures {
-			best = a
-		}
-		if a.Failures == 0 {
-			s.rotate = (idx + 1) % n
-			return a.Clone()
-		}
-	}
-	s.rotate = (s.rotate + 1) % n
-	return best.Clone()
-}
-
-// MarkAccountResult 记录一次账号调用结果。
-func (s *Store) MarkAccountResult(id string, ok bool, note string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, a := range s.st.Accounts {
-		if a.ID != id {
-			continue
-		}
-		a.LastUsed = time.Now().Unix()
-		if ok {
-			a.Failures = 0
-			a.Status = "ok"
-			a.LastErr = ""
-			if note != "" {
-				a.Note = note
-			}
-		} else {
-			a.Failures++
-			a.Status = "error"
-			a.LastErr = note
-		}
-		return
-	}
-}
-
-// ToggleAccount 切换账号启用状态；返回切换后的值。
-func (s *Store) ToggleAccount(id string) (enabled bool, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false, false
-	}
-	a.Enabled = !a.Enabled
-	return a.Enabled, true
-}
-
-// SetAccountEnabled 设置账号启用状态。
-func (s *Store) SetAccountEnabled(id string, enabled bool) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false
-	}
-	a.Enabled = enabled
-	return true
-}
-
-// ClearAccountErrors 清空账号的失败计数与错误状态。
-func (s *Store) ClearAccountErrors(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false
-	}
-	a.Failures = 0
-	a.Status = "ok"
-	a.LastErr = ""
-	return true
-}
-
-// MarkCheckin 记录一次签到结果。
-func (s *Store) MarkCheckin(id, date string, reward int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, a := range s.st.Accounts {
-		if a.ID != id {
-			continue
-		}
-		if date == "" {
-			date = time.Now().Format("2006-01-02")
-		}
-		a.LastCheckinDate = date
-		a.LastCheckinAt = time.Now().Unix()
-		a.LastCheckinReward = reward
-		return
-	}
-}
-
-// MarkCheckinPending 登记「上游已受理、奖励确认中」的签到。
-//
-// 由 /v1/checkin 在收到 pending 结果时调用。这是登记而非重试，因此不累加
-// 重试次数；换了一天则重新计数（每日签到按天幂等）。
-func (s *Store) MarkCheckinPending(id, date string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false
-	}
-	if date == "" {
-		date = time.Now().Format("2006-01-02")
-	}
-	if a.PendingCheckinDate != date {
-		a.PendingCheckinTries = 0
-	}
-	a.PendingCheckinDate = date
-	a.PendingCheckinAt = time.Now().Unix()
-	return true
-}
-
-// RecordCheckinRetry 记录一次后台重试（尝试次数 +1）。
-func (s *Store) RecordCheckinRetry(id, date string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false
-	}
-	if date == "" {
-		date = time.Now().Format("2006-01-02")
-	}
-	if a.PendingCheckinDate != date {
-		a.PendingCheckinDate = date
-		a.PendingCheckinTries = 0
-	}
-	a.PendingCheckinTries++
-	a.PendingCheckinAt = time.Now().Unix()
-	return true
-}
-
-// ClearCheckinPending 清除待确认的签到记录。
-func (s *Store) ClearCheckinPending(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	a := s.accountLocked(id)
-	if a == nil {
-		return false
-	}
-	if a.PendingCheckinDate == "" && a.PendingCheckinAt == 0 && a.PendingCheckinTries == 0 {
-		return false
-	}
-	a.PendingCheckinDate = ""
-	a.PendingCheckinAt = 0
-	a.PendingCheckinTries = 0
-	return true
-}
-
-// PendingCheckins 返回存在待确认签到的账号快照。
-//
-// 返回的是深拷贝，调用方可以随意读取；是否过期 / 是否放弃由调用方决定。
-func (s *Store) PendingCheckins() []*account.Account {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*account.Account, 0, 4)
-	for _, a := range s.st.Accounts {
-		if a.PendingCheckinDate != "" || a.PendingCheckinAt > 0 {
-			out = append(out, a.Clone())
-		}
-	}
-	return out
-}
-
-// MarkTaskRun 累加自动任务计数。
-func (s *Store) MarkTaskRun(id, date string, n int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, a := range s.st.Accounts {
-		if a.ID != id {
-			continue
-		}
-		if date == "" {
-			date = time.Now().Format("2006-01-02")
-		}
-		if a.LastTaskDate != date {
-			a.LastTaskDate = date
-			a.LastTaskCount = 0
-		}
-		a.LastTaskCount += n
-		return
-	}
-}
-
-// --- 密钥 ---
-
-// Keys 返回密钥快照。
-func (s *Store) Keys() []*APIKey {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*APIKey, len(s.st.Keys))
-	copy(out, s.st.Keys)
-	return out
-}
-
-// AddKey 新增密钥。
-func (s *Store) AddKey(name string) *APIKey {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	k := &APIKey{
-		Key:       "sk-" + ids.Hex(24),
-		Name:      name,
-		Enabled:   true,
-		CreatedAt: time.Now().Unix(),
-	}
-	s.st.Keys = append(s.st.Keys, k)
-	return k
-}
-
-// DeleteKey 删除密钥。
-func (s *Store) DeleteKey(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i, k := range s.st.Keys {
-		if k.Key == key {
-			s.st.Keys = append(s.st.Keys[:i], s.st.Keys[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// ToggleKey 启用/停用密钥。
-func (s *Store) ToggleKey(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, k := range s.st.Keys {
-		if k.Key == key {
-			k.Enabled = !k.Enabled
-			return true
-		}
-	}
-	return false
-}
-
-// ValidKey 校验密钥并计数。
-func (s *Store) ValidKey(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, k := range s.st.Keys {
-		if k.Key == key && k.Enabled {
-			k.LastUsed = time.Now().Unix()
-			k.Requests++
-			return true
-		}
-	}
-	return false
-}
-
-// HasKeys 报告是否已签发任何密钥。
-func (s *Store) HasKeys() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.st.Keys) > 0
-}
-
-// --- 设置 / 统计 / 日志 ---
-
-// Settings 返回设置快照。
-func (s *Store) Settings() Settings {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	cp := s.st.Settings
-	cp.ModelAliases = map[string]string{}
-	for k, v := range s.st.Settings.ModelAliases {
-		cp.ModelAliases[k] = v
-	}
-	return cp
-}
-
-// UpdateSettings 局部更新设置。
-func (s *Store) UpdateSettings(fn func(*Settings)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fn(&s.st.Settings)
-}
-
-// Stats 返回统计快照。
-func (s *Store) Stats() Stats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.st.Stats
-}
-
-// Logs 返回最近的日志。
-func (s *Store) Logs(limit int) []LogEntry {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	n := len(s.st.Logs)
-	if limit <= 0 || limit > n {
-		limit = n
-	}
-	out := make([]LogEntry, limit)
-	copy(out, s.st.Logs[n-limit:])
-	return out
-}
-
-// Record 记录一次请求结果并更新统计。
-func (s *Store) Record(e LogEntry, outChars int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.st.Stats.TotalRequests++
-	if e.Status >= 400 || e.Err != "" {
-		s.st.Stats.FailedRequests++
-	}
-	s.st.Stats.TotalCharsOut += int64(outChars)
-	s.st.Logs = append(s.st.Logs, e)
-	if keep := s.st.Settings.LogKeep; keep > 0 && len(s.st.Logs) > keep {
-		s.st.Logs = s.st.Logs[len(s.st.Logs)-keep:]
-	}
-}
-
-// ClearLogs 清空日志。
-func (s *Store) ClearLogs() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.st.Logs = nil
-}
-
-// ClearStats 重置统计。
-func (s *Store) ClearStats() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.st.Stats = Stats{StartedAt: time.Now().Unix()}
+	return s.st.Meta
 }

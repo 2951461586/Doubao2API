@@ -1,6 +1,7 @@
 package account
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -214,5 +215,62 @@ func TestSessionID(t *testing.T) {
 	}
 	if got := (&Account{}).SessionID(); got != "" {
 		t.Errorf("空 Cookie 应返回空串，实际 %q", got)
+	}
+}
+
+func TestSessionExpiry(t *testing.T) {
+	a := &Account{Cookies: map[string]string{}}
+	if _, ok := a.SessionExpiry(); ok {
+		t.Error("没有 sid_guard 时不应推算出到期时间")
+	}
+
+	// 创建于 2026-10-03 16:35:33 CST、TTL 60 天。
+	created := int64(1790920533)
+	a.Cookies["sid_guard"] = "session|1790920533|5184000|abc"
+	exp, ok := a.SessionExpiry()
+	if !ok {
+		t.Fatal("合法 sid_guard 应能推算")
+	}
+	if exp.Unix() != created+5184000 {
+		t.Errorf("到期时间 = %d, want %d", exp.Unix(), created+5184000)
+	}
+
+	// 毫秒时间戳同样兼容。
+	a.Cookies["sid_guard"] = "session|1790920533000|5184000|"
+	if exp2, ok := a.SessionExpiry(); !ok || exp2.Unix() != exp.Unix() {
+		t.Errorf("毫秒时间戳应等价，got %v ok=%v", exp2, ok)
+	}
+
+	// 字段不足 / 非数字 / TTL 非正：都无法推算。
+	for _, bad := range []string{
+		"session|123", "session|abc|100|", "session|123|0|", "session|123|-5|",
+	} {
+		a.Cookies["sid_guard"] = bad
+		if _, ok := a.SessionExpiry(); ok {
+			t.Errorf("非法 sid_guard %q 不应推算成功", bad)
+		}
+	}
+}
+
+func TestDaysUntilExpiry(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	a := &Account{Cookies: map[string]string{}}
+
+	// 3 天后到期（四舍五入向上取整）。
+	a.Cookies["sid_guard"] = fmt.Sprintf("s|%d|%d|", now.Unix(), 3*24*3600)
+	if days, ok := a.DaysUntilExpiry(now); !ok || days != 3 {
+		t.Errorf("DaysUntilExpiry = %d, ok=%v, want 3", days, ok)
+	}
+
+	// 已过期：返回负数。
+	a.Cookies["sid_guard"] = fmt.Sprintf("s|%d|%d|", now.Unix()-10*24*3600, 24*3600)
+	if days, ok := a.DaysUntilExpiry(now); !ok || days >= 0 {
+		t.Errorf("已过期应返回负数，实际 %d ok=%v", days, ok)
+	}
+
+	// 不足一天按 1 天算。
+	a.Cookies["sid_guard"] = fmt.Sprintf("s|%d|%d|", now.Unix(), 3600)
+	if days, _ := a.DaysUntilExpiry(now); days != 1 {
+		t.Errorf("不足一天应向上取整为 1，实际 %d", days)
 	}
 }

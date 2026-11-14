@@ -4,12 +4,19 @@ package registry
 import (
 	"slices"
 	"strings"
+	"time"
 
 	"doubao2api/internal/doubao"
 )
 
 // DefaultID 是无法识别时回落的内置模型（快速模式）。
 const DefaultID = "doubao"
+
+// CreatedAt 是模型清单的发布时间（Unix 秒），用于 /v1/models 的 created 字段。
+//
+// 这个值必须稳定：此前每个请求都取 time.Now()，导致响应不可缓存、
+// 客户端每次刷新都看到「模型刚刚更新」。
+var CreatedAt = time.Date(2026, 11, 14, 0, 0, 0, 0, time.UTC).Unix()
 
 // maxAliasDepth 限制自定义别名链的长度，防止环或超长链拖慢解析。
 const maxAliasDepth = 8
@@ -29,14 +36,90 @@ type Model struct {
 	ModelItemKey string `json:"model_item_key,omitempty"`
 	// AgentMode 非 0 时按工作模式下发（agent_mode=1、conversation_mode=2）。
 	AgentMode int `json:"agent_mode,omitempty"`
+	// ReasoningLevels 是客户端为这个模型提供的推理档位名（如 低/中/高）。
+	// 仅作展示与文档用途：实际强度仍由请求的 reasoning_effort 决定。
+	ReasoningLevels []string `json:"reasoning_levels,omitempty"`
 }
 
 // Builtin 是内置模型清单。
 //
-// 豆包客户端不区分底层模型，而是通过 need_deep_think 档位切换
-// 快速 / 思考 / 专家三种模式，因此这里把档位映射为独立模型 ID；
-// 另提供一组「技能模型」，选中即自动带上 action_bar_skill_id。
+// 顺序与桌面端「工作任务」模型列表一致（见
+// `internal/doubao/client_models.go`，数据来源是客户端缓存
+// `_DesktopActionBarBriefListRequestCacheDataV1`）。
+//
+// 两类模型：
+//   - 带 ModelItemKey 的：工作模式（agent_mode=1）模型，模型选择走
+//     conversation_init_ext / model_config / aggregate_params；
+//   - 不带 key 的：普通对话三档（need_deep_think=0/1/3），保留给旧客户端。
+//
+// 另有一组「技能模型」，选中即自动带上 action_bar_skill_id。
+//
+// 可用 `doubao2api-probe -models` 查看当前清单，
+// `doubao2api-probe -client-models` 与本机客户端缓存做差异比对。
 var Builtin = []Model{
+	// --- 客户端「工作任务」模型（顺序与桌面端一致） ---
+	{
+		ID: "auto", Name: "自动", ThinkLevel: doubao.ThinkOn,
+		Context: 256000, Desc: "客户端默认模型（自动选择，model_item_key=9）",
+		ModelItemKey: "9", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高"},
+	},
+	{
+		ID: "doubao-2.1-lite", Name: "豆包 2.1 Lite", ThinkLevel: doubao.ThinkOn,
+		Context: 256000, Desc: "轻量模型，256k 上下文",
+		ModelItemKey: "seed-lite-7b", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高"},
+	},
+	{
+		ID: "doubao-2.1-pro", Name: "豆包 2.1 Pro", ThinkLevel: doubao.ThinkOn,
+		Context: 256000, Desc: "豆包 2.1 Pro，256k 上下文",
+		ModelItemKey: "5", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高"},
+	},
+	{
+		ID: "deepseek-v4-flash", Name: "DeepSeek V4.1 Flash", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式默认档，限时低倍率",
+		ModelItemKey: "person-deepseek-v4-1-flash-261017", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高", "极高", "最高"},
+	},
+	{
+		ID: "kimi-k3.1-pro", Name: "Kimi K3.1 Pro", ThinkLevel: doubao.ThinkExpert,
+		Context: 300000, Desc: "工作模式，Kimi K3.1 Pro",
+		ModelItemKey: "person-kimi-k3-1-pro-261111", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高", "极高", "最高"},
+	},
+	{
+		ID: "kimi-k3.1-pro-fast", Name: "Kimi K3.1 Pro 高速", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式，Kimi K3.1 Pro 高速档",
+		ModelItemKey: "person-kimi-k3-1-pro-highspeed-261111", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高", "极高", "最高"},
+	},
+	{
+		ID: "kimi-k3", Name: "Kimi K3", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式，Kimi K3",
+		ModelItemKey: "person-kimi-k3-261111", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高", "极高", "最高"},
+	},
+	{
+		ID: "glm-5.3", Name: "GLM 5.3", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式，GLM 5.3",
+		ModelItemKey: "person-glm-5-3-261111", AgentMode: 1,
+		ReasoningLevels: []string{"低", "高", "最高"},
+	},
+	{
+		ID: "glm-5.3-flash", Name: "GLM 5.3 Flash", ThinkLevel: doubao.ThinkOn,
+		Context: 300000, Desc: "工作模式，GLM 5.3 Flash",
+		ModelItemKey: "person-glm-5-3-flash-261111", AgentMode: 1,
+		ReasoningLevels: []string{"低", "高", "最高"},
+	},
+	{
+		ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", ThinkLevel: doubao.ThinkExpert,
+		Context: 300000, Desc: "工作模式，DeepSeek 深度推理（上游键为 GA 版）",
+		ModelItemKey: "person-deepseek-v4-pro-ga-260813", AgentMode: 1,
+		ReasoningLevels: []string{"低", "中", "高", "极高", "最高"},
+	},
+
+	// --- 普通对话三档（need_deep_think，无 model_item_key） ---
 	{
 		ID: "doubao", Name: "豆包·快速", ThinkLevel: doubao.ThinkOff,
 		Context: 128000, Desc: "默认模式，响应最快，无思维链",
@@ -49,35 +132,8 @@ var Builtin = []Model{
 		ID: "doubao-expert", Name: "豆包·专家", ThinkLevel: doubao.ThinkExpert,
 		Context: 256000, Desc: "专家模式，深度推理，适合复杂任务",
 	},
-	// 工作模式（agent_mode=1）模型：modeSelectData.menuConfV2.mode_list 里的
-	// model_item_key，实测可用（见 docs/recon.md §6.12）。这些模型只能在工作模式使用。
-	{
-		ID: "deepseek-v4-flash", Name: "DeepSeek V4.1 Flash", ThinkLevel: doubao.ThinkOn,
-		Context: 300000, Desc: "工作模式默认档，限时低倍率",
-		ModelItemKey: "person-deepseek-v4-1-flash-261017", AgentMode: 1,
-	},
-	{
-		ID: "deepseek-v4-pro", Name: "DeepSeek V4.1 Pro", ThinkLevel: doubao.ThinkExpert,
-		Context: 300000, Desc: "工作模式，DeepSeek 深度推理",
-		ModelItemKey: "person-deepseek-v4-pro-ga-260813", AgentMode: 1,
-	},
-	{
-		ID: "kimi-k3", Name: "Kimi K3", ThinkLevel: doubao.ThinkOn,
-		Context: 300000, Desc: "工作模式，Kimi K3",
-		ModelItemKey: "person-kimi-k3-261111", AgentMode: 1,
-	},
-	{
-		ID: "kimi-k3.1-pro", Name: "Kimi K3.1 Pro", ThinkLevel: doubao.ThinkExpert,
-		Context: 300000, Desc: "工作模式，Kimi K3.1 Pro",
-		ModelItemKey: "person-kimi-k3-1-pro-261111", AgentMode: 1,
-	},
-	{
-		ID: "doubao-2.1-pro", Name: "豆包 2.1 Pro", ThinkLevel: doubao.ThinkOn,
-		Context: 256000, Desc: "工作模式，豆包 2.1 Pro",
-		ModelItemKey: "5", AgentMode: 1,
-	},
 
-	// 技能模型（对齐桌面端 SkillType）
+	// --- 技能模型（对齐桌面端 SkillType） ---
 	{ID: "doubao-draw", Name: "豆包·绘画", ThinkLevel: doubao.ThinkOff, Skill: doubao.SkillImageGen, Context: 32000, Desc: "图像生成技能（Seedream）"},
 	{ID: "doubao-search", Name: "豆包·搜索", ThinkLevel: doubao.ThinkOn, Skill: doubao.SkillSearch, Context: 128000, Desc: "AI 搜索技能（联网）"},
 	{ID: "doubao-write", Name: "豆包·写作", ThinkLevel: doubao.ThinkOn, Skill: doubao.SkillWrite, Context: 128000, Desc: "创意写作技能"},
@@ -94,30 +150,37 @@ var Builtin = []Model{
 
 // aliases 是内置别名，指向内置模型 ID。
 var aliases = map[string]string{
-	"doubao-pro":        "doubao",
-	"doubao-lite":       "doubao",
-	"doubao-fast":       "doubao",
-	"doubao-reason":     "doubao-think",
-	"doubao-thinking":   "doubao-think",
-	"doubao-max":        "doubao-expert",
-	"doubao-deep":       "doubao-expert",
-	"gpt-3.5-turbo":     "doubao",
-	"gpt-4":             "doubao-think",
-	"gpt-4o":            "doubao",
-	"gpt-4o-mini":       "doubao",
-	"claude-3-5-sonnet": "doubao-think",
-	"gemini-pro":        "doubao",
-	"doubao-image":      "doubao-draw",
-	"doubao-txt2img":    "doubao-draw",
-	"doubao-web":        "doubao-search",
-	"doubao-coding":     "doubao-code",
-	"doubao-python":     "doubao-data",
-	"doubao-slides":     "doubao-ppt",
-	"deepseek":          "deepseek-v4-flash",
-	"deepseek-flash":    "deepseek-v4-flash",
-	"deepseek-pro":      "deepseek-v4-pro",
-	"kimi":              "kimi-k3",
-	"kimi-k3.1":         "kimi-k3.1-pro",
+	"doubao-pro":          "doubao-2.1-pro",
+	"doubao-lite":         "doubao-2.1-lite",
+	"doubao-auto":         "auto",
+	"doubao-fast":         "doubao",
+	"doubao-reason":       "doubao-think",
+	"doubao-thinking":     "doubao-think",
+	"doubao-max":          "doubao-expert",
+	"doubao-deep":         "doubao-expert",
+	"gpt-3.5-turbo":       "doubao",
+	"gpt-4":               "doubao-think",
+	"gpt-4o":              "doubao",
+	"gpt-4o-mini":         "doubao",
+	"claude-3-5-sonnet":   "doubao-think",
+	"gemini-pro":          "doubao",
+	"doubao-image":        "doubao-draw",
+	"doubao-txt2img":      "doubao-draw",
+	"doubao-web":          "doubao-search",
+	"doubao-coding":       "doubao-code",
+	"doubao-python":       "doubao-data",
+	"doubao-slides":       "doubao-ppt",
+	"deepseek":            "deepseek-v4-flash",
+	"deepseek-flash":      "deepseek-v4-flash",
+	"deepseek-v4.1-flash": "deepseek-v4-flash",
+	"deepseek-pro":        "deepseek-v4-pro",
+	"kimi":                "kimi-k3",
+	"kimi-k3.1":           "kimi-k3.1-pro",
+	"kimi-fast":           "kimi-k3.1-pro-fast",
+	"kimi-highspeed":      "kimi-k3.1-pro-fast",
+	"glm":                 "glm-5.3",
+	"glm-flash":           "glm-5.3-flash",
+	"seed-lite":           "doubao-2.1-lite",
 }
 
 // Resolve 把用户传入的模型名解析为内置模型。

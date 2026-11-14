@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // RefreshCSRF 调用 /passport/safe/csrf_token/ 刷新 CSRF token 并写入账号缓存。
@@ -59,15 +58,4 @@ func (c *Client) ensureCSRF(ctx context.Context, a *Account, force bool) error {
 	}
 	_, err := c.RefreshCSRF(ctx, a)
 	return err
-}
-
-// looksLikeAuthError 判断错误信息是否可能由 CSRF / 登录态失效导致。
-func looksLikeAuthError(msg string) bool {
-	m := strings.ToLower(msg)
-	for _, k := range []string{"csrf", "x-tt-passport", "登录", "login", "session", "passport", "unauthorized", "forbidden"} {
-		if strings.Contains(m, k) {
-			return true
-		}
-	}
-	return false
 }

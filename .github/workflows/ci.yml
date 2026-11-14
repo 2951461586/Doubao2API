@@ -54,6 +54,10 @@ jobs:
         run: |
           go test -count=1 -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -20
+          sh scripts/coverage-gate.sh coverage.out
+
+      - name: Fuzz SSE parser (smoke)
+        run: go test ./internal/doubao -run '^$' -fuzz FuzzReadSSE -fuzztime 15s
 
   build:
     name: build (linux/amd64)

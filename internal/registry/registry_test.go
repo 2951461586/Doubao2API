@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"strings"
 	"testing"
 
 	"doubao2api/internal/doubao"
@@ -43,13 +44,18 @@ func TestResolveExact(t *testing.T) {
 
 func TestResolveBuiltinAlias(t *testing.T) {
 	cases := map[string]string{
-		"doubao-pro":        "doubao",
+		"doubao-pro":        "doubao-2.1-pro",
+		"doubao-lite":       "doubao-2.1-lite",
+		"doubao-auto":       "auto",
 		"doubao-reason":     "doubao-think",
 		"doubao-max":        "doubao-expert",
 		"gpt-4o":            "doubao",
 		"claude-3-5-sonnet": "doubao-think",
 		"doubao-image":      "doubao-draw",
 		"doubao-slides":     "doubao-ppt",
+		"glm":               "glm-5.3",
+		"glm-flash":         "glm-5.3-flash",
+		"kimi-fast":         "kimi-k3.1-pro-fast",
 	}
 	for in, want := range cases {
 		if got := Resolve(in, nil); got.ID != want {
@@ -187,5 +193,102 @@ func TestListWithoutCustom(t *testing.T) {
 	got[0].ID = "mutated"
 	if Builtin[0].ID == "mutated" {
 		t.Error("List 应返回 Builtin 的副本")
+	}
+}
+
+// TestModelCatalogConsistency 是「模型名实相符」的守卫。
+//
+// 线上教训（issues.md #6）：deepseek-v4-pro 的展示名写着 V4.1，但上游键是
+// person-deepseek-v4-pro-ga-260813（GA 版）。用户按名字选模型、按名字计费，
+// 名实不符时很难察觉。这里强制「名字里的版本号」与「键里的版本号」一致。
+func TestModelCatalogConsistency(t *testing.T) {
+	seen := map[string]bool{}
+	for _, m := range Builtin {
+		if m.ID == "" {
+			t.Errorf("模型缺少 ID: %+v", m)
+		}
+		if seen[m.ID] {
+			t.Errorf("模型 ID 重复: %s", m.ID)
+		}
+		seen[m.ID] = true
+		if m.ThinkLevel < 0 || m.ThinkLevel > 3 {
+			t.Errorf("%s: think_level 越界: %d", m.ID, m.ThinkLevel)
+		}
+		if m.ModelItemKey == "" {
+			continue
+		}
+		// 只有工作模式模型带 model_item_key。
+		if m.AgentMode != 1 {
+			t.Errorf("%s: 带 model_item_key 但不是工作模式（agent_mode=%d）", m.ID, m.AgentMode)
+		}
+		nameV41 := strings.Contains(m.Name, "V4.1")
+		keyV41 := strings.Contains(m.ModelItemKey, "v4-1")
+		if nameV41 != keyV41 {
+			t.Errorf("%s: 名称 %q 与上游键 %q 的版本号不一致", m.ID, m.Name, m.ModelItemKey)
+		}
+	}
+}
+
+// TestModelCreatedAtStable 保证 /v1/models 的 created 可缓存。
+func TestModelCreatedAtStable(t *testing.T) {
+	if CreatedAt <= 0 {
+		t.Fatalf("CreatedAt 必须是一个固定的正数时间戳，实际 %d", CreatedAt)
+	}
+}
+
+// TestRegistryCoversClientModels 锁定「与桌面端模型清单对齐」。
+//
+// 数据来源：桌面端 Preferences 里的
+// `_DesktopActionBarBriefListRequestCacheDataV1.data.modeSelectData`
+// （2026-11-14 从本机 Profile 2/3 缓存读取，见 `doubao2bao/internal/doubao/client_models.go`）。
+//
+// 客户端升级后清单可能变化：用 `doubao2api-probe -client-models` 做差异比对，
+// 确认后再更新这里的期望值与 Builtin。
+func TestRegistryCoversClientModels(t *testing.T) {
+	want := []struct {
+		name    string
+		key     string
+		context int
+	}{
+		{"自动", "9", 256000},
+		{"豆包 2.1 Lite", "seed-lite-7b", 256000},
+		{"豆包 2.1 Pro", "5", 256000},
+		{"DeepSeek V4.1 Flash", "person-deepseek-v4-1-flash-261017", 300000},
+		{"Kimi K3.1 Pro", "person-kimi-k3-1-pro-261111", 300000},
+		{"Kimi K3.1 Pro 高速", "person-kimi-k3-1-pro-highspeed-261111", 300000},
+		{"Kimi K3", "person-kimi-k3-261111", 300000},
+		{"GLM 5.3", "person-glm-5-3-261111", 300000},
+		{"GLM 5.3 Flash", "person-glm-5-3-flash-261111", 300000},
+		{"DeepSeek V4 Pro", "person-deepseek-v4-pro-ga-260813", 300000},
+	}
+
+	byKey := map[string]Model{}
+	for _, m := range Builtin {
+		if m.ModelItemKey != "" {
+			if _, dup := byKey[m.ModelItemKey]; dup {
+				t.Errorf("model_item_key 重复: %s", m.ModelItemKey)
+			}
+			byKey[m.ModelItemKey] = m
+		}
+	}
+
+	for _, w := range want {
+		m, ok := byKey[w.key]
+		if !ok {
+			t.Errorf("缺少客户端模型 %q（key=%s）", w.name, w.key)
+			continue
+		}
+		if m.Name != w.name {
+			t.Errorf("%s: 名称 = %q, want %q", w.key, m.Name, w.name)
+		}
+		if m.Context != w.context {
+			t.Errorf("%s: 上下文 = %d, want %d", w.key, m.Context, w.context)
+		}
+		if m.AgentMode != 1 {
+			t.Errorf("%s: 工作模式模型 agent_mode 必须为 1", w.key)
+		}
+		if len(m.ReasoningLevels) == 0 {
+			t.Errorf("%s: 应带上客户端推理档位", w.key)
+		}
 	}
 }

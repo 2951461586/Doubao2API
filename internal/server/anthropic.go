@@ -44,12 +44,15 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 	start := time.Now()
 
 	var req anthropicRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeAnthropicErr(w, http.StatusBadRequest, "invalid_request_error", "请求体解析失败: "+err.Error())
 		return
 	}
 	if len(req.Messages) == 0 {
 		writeAnthropicErr(w, http.StatusBadRequest, "invalid_request_error", "messages 不能为空")
+		return
+	}
+	if err := rejectUnsupportedTools(w, req.Tools, req.ToolChoice); err != nil {
 		return
 	}
 
@@ -104,8 +107,11 @@ func (s *Server) blockingAnthropic(w http.ResponseWriter, r *http.Request, upReq
 		})
 	})
 	if err != nil {
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(upReq.Text), 0, err)
-		writeAnthropicErr(w, http.StatusBadGateway, "api_error", err.Error())
+		kind := doubao.Classify(err)
+		s.record(r, key, acct, model.ID, false, start, len(upReq.Text), 0, err)
+		if kind != doubao.KindCanceled {
+			writeAnthropicErr(w, kind.HTTPStatus(), anthropicErrorType(kind), err.Error())
+		}
 		return
 	}
 
@@ -115,7 +121,7 @@ func (s *Server) blockingAnthropic(w http.ResponseWriter, r *http.Request, upReq
 	}
 	content = append(content, map[string]any{"type": "text", "text": out.String()})
 
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
+	s.record(r, key, acct, model.ID, false, start, len(upReq.Text), out.Len(), nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":            "msg_" + doubao.RandomHex(12),
 		"type":          "message",
@@ -138,13 +144,6 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 		writeAnthropicErr(w, http.StatusInternalServerError, "api_error", "服务端不支持流式响应")
 		return
 	}
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream; charset=utf-8")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
 	msgID := "msg_" + doubao.RandomHex(12)
 
 	send := func(event string, payload map[string]any) {
@@ -156,14 +155,29 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 		flusher.Flush()
 	}
 
-	send("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id": msgID, "type": "message", "role": "assistant", "model": model.ID,
-			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]any{"input_tokens": estTokens(upReq.Text), "output_tokens": 0},
-		},
-	})
+	// commit 在第一帧产生时才提交 SSE 头与 200：未提交前的错误返回普通 JSON，
+	// 客户端能看到真实状态码，而不是「200 + 一个 error 事件」。
+	committed := false
+	commit := func() {
+		if committed {
+			return
+		}
+		committed = true
+		h := w.Header()
+		h.Set("Content-Type", "text/event-stream; charset=utf-8")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Connection", "keep-alive")
+		h.Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		send("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id": msgID, "type": "message", "role": "assistant", "model": model.ID,
+				"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
+				"usage": map[string]any{"input_tokens": estTokens(upReq.Text), "output_tokens": 0},
+			},
+		})
+	}
 
 	// 内容块按需开启：思维链块在前，正文块在后（与上游补丁流顺序一致）。
 	index := -1
@@ -198,6 +212,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 			if c.ErrorCode != 0 {
 				return &doubao.Error{Code: c.ErrorCode, Msg: c.ErrorMsg}
 			}
+			commit()
 			if c.Thinking != "" {
 				openBlock("thinking")
 				send("content_block_delta", map[string]any{
@@ -216,17 +231,26 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 			return nil
 		})
 	})
+	streamKind := doubao.Classify(err)
 	if err != nil {
 		streamErr = err
+		if !committed {
+			s.record(r, key, acct, model.ID, true, start, len(upReq.Text), 0, err)
+			if streamKind != doubao.KindCanceled {
+				writeAnthropicErr(w, streamKind.HTTPStatus(), anthropicErrorType(streamKind), err.Error())
+			}
+			return
+		}
 	}
 
+	commit()
 	if kind != "" {
 		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
 	}
-	if streamErr != nil {
+	if streamErr != nil && streamKind != doubao.KindCanceled {
 		send("error", map[string]any{
 			"type":  "error",
-			"error": map[string]any{"type": "api_error", "message": streamErr.Error()},
+			"error": map[string]any{"type": anthropicErrorType(streamKind), "message": streamErr.Error()},
 		})
 	}
 	send("message_delta", map[string]any{
@@ -236,7 +260,19 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 	})
 	send("message_stop", map[string]any{"type": "message_stop"})
 
-	s.record(key, acct, model.ID, true, statusOf(streamErr), start, len(upReq.Text), outLen, streamErr)
+	s.record(r, key, acct, model.ID, true, start, len(upReq.Text), outLen, streamErr)
+}
+
+// anthropicErrorType 把内部分类映射为 Anthropic 的 error.type。
+func anthropicErrorType(k doubao.Kind) string {
+	switch k {
+	case doubao.KindBusiness:
+		return "invalid_request_error"
+	case doubao.KindTimeout, doubao.KindAccount:
+		return "overloaded_error"
+	default:
+		return "api_error"
+	}
 }
 
 // --- 请求转换 ---

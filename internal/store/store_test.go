@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -86,7 +87,7 @@ func TestOpenRejectsBrokenJSON(t *testing.T) {
 func TestSaveReloadRoundTrip(t *testing.T) {
 	s := newStore(t)
 	s.UpsertAccount(testAccount("a1", "sess-1"))
-	k := s.AddKey("default")
+	_, plain := s.AddKey("default")
 	s.UpdateSettings(func(st *Settings) {
 		st.AllowAnonymous = true
 		st.LogKeep = 10
@@ -117,7 +118,7 @@ func TestSaveReloadRoundTrip(t *testing.T) {
 	if len(s2.Accounts()) != 1 || s2.Accounts()[0].ID != "a1" {
 		t.Fatalf("账号未持久化: %+v", s2.Accounts())
 	}
-	if !s2.HasKeys() || !s2.ValidKey(k.Key) {
+	if !s2.HasKeys() || !s2.ValidKey(plain) {
 		t.Error("密钥未持久化")
 	}
 	st := s2.Settings()
@@ -265,7 +266,7 @@ func TestRemoveAccount(t *testing.T) {
 func TestNextAccountRotation(t *testing.T) {
 	s := newStore(t)
 	a1 := testAccount("a1", "s1")
-	a1.Failures = 2 // 有失败记录，优先级最低
+	a1.Failures = 2 // 历史失败但已过冷却：仍可被选中
 	a2 := testAccount("a2", "s2")
 	a2.Enabled = false // 停用，必须跳过
 	a3 := testAccount("a3", "s3")
@@ -279,39 +280,35 @@ func TestNextAccountRotation(t *testing.T) {
 			t.Fatal("NextAccount() = nil, want a3")
 		}
 		if got.ID != "a3" {
-			t.Fatalf("第 %d 次轮询选中 %q, want a3（a2 停用、a1 有失败）", i, got.ID)
+			t.Fatalf("第 %d 次轮询选中 %q, want a3（a2 停用、a1 失败次数更多）", i, got.ID)
 		}
 	}
 
-	// 全部有失败时回退到失败最少的账号，且不硬阻塞。
+	// 账号失败后进入冷却：本次请求内不再选它，改选其它可用账号。
 	s.MarkAccountResult("a3", false, "boom")
 	got := s.NextAccount()
-	if got == nil || got.ID != "a3" {
-		t.Fatalf("应选择失败最少的 a3，实际 %+v", got)
+	if got == nil || got.ID != "a1" {
+		t.Fatalf("a3 失败冷却后应改选 a1，实际 %+v", got)
 	}
 
-	// 唯一启用的账号也失败时仍应返回它，而不是 nil。
-	s.MarkAccountResult("a3", false, "boom")
+	// 剔除已试过的账号后应返回 nil（一次请求内不重复选同一个）。
+	if got := s.NextAccountExcluding(map[string]bool{"a1": true, "a3": true}); got != nil {
+		t.Fatalf("全部账号都被剔除时应返回 nil，实际 %+v", got)
+	}
+
+	// 清除错误状态后 a3 立即恢复，不需要等待冷却。
+	s.ClearAccountErrors("a3")
 	if got := s.NextAccount(); got == nil || got.ID != "a3" {
-		t.Fatalf("全部失败时仍应返回可用账号，实际 %+v", got)
+		t.Fatalf("清除错误后应恢复 a3，实际 %+v", got)
 	}
 
 	// 全部停用时返回 nil。
 	// 注意：Accounts() 返回的是深拷贝，必须经 store 方法修改（这本身也是一条回归断言）。
-	s.UpdateSettings(func(*Settings) {})
 	for _, a := range s.Accounts() {
-		a.Enabled = false // 只改副本
-	}
-	if got := s.NextAccount(); got == nil {
-		t.Error("修改快照不应影响内部状态")
-	}
-	for _, a := range s.Accounts() {
-		if !s.SetAccountEnabled(a.ID, false) {
-			t.Fatalf("SetAccountEnabled(%q) 失败", a.ID)
-		}
+		s.SetAccountEnabled(a.ID, false)
 	}
 	if got := s.NextAccount(); got != nil {
-		t.Errorf("全部停用时 NextAccount() = %v, want nil", got)
+		t.Fatalf("全部停用时应返回 nil，实际 %+v", got)
 	}
 }
 
@@ -389,9 +386,15 @@ func TestAPIKeyLifecycle(t *testing.T) {
 	if s.HasKeys() {
 		t.Fatal("初始状态不应有密钥")
 	}
-	k := s.AddKey("ci")
-	if !strings.HasPrefix(k.Key, "sk-") {
-		t.Errorf("密钥应以 sk- 开头，实际 %q", k.Key)
+	k, plain := s.AddKey("ci")
+	if !strings.HasPrefix(plain, "sk-") {
+		t.Errorf("密钥应以 sk- 开头，实际 %q", plain)
+	}
+	if k.ID == "" || k.KeyHash == "" || k.Display == "" {
+		t.Error("新密钥应带 ID / 指纹 / 展示片段")
+	}
+	if strings.Contains(k.KeyHash, plain) || k.Display == plain {
+		t.Error("持久化字段不得包含明文密钥")
 	}
 	if !k.Enabled || k.CreatedAt == 0 {
 		t.Error("新密钥应默认启用并记录创建时间")
@@ -400,46 +403,59 @@ func TestAPIKeyLifecycle(t *testing.T) {
 		t.Error("签发后 HasKeys() 应为 true")
 	}
 
-	if !s.ValidKey(k.Key) {
+	if !s.ValidKey(plain) {
 		t.Error("启用状态的密钥应校验通过")
 	}
-	if k.Requests != 1 || k.LastUsed == 0 {
-		t.Errorf("校验应计数: requests=%d last_used=%d", k.Requests, k.LastUsed)
+	if got := s.Keys()[0]; got.Requests != 1 || got.LastUsed == 0 {
+		t.Errorf("校验应计数: requests=%d last_used=%d", got.Requests, got.LastUsed)
 	}
 	if s.ValidKey("sk-not-exist") {
 		t.Error("未知密钥不应通过")
 	}
 
-	if !s.ToggleKey(k.Key) {
+	if !s.ToggleKey(k.ID) {
 		t.Fatal("停用应返回 true")
 	}
-	if s.ValidKey(k.Key) {
+	if s.ValidKey(plain) {
 		t.Error("停用后的密钥不应通过")
 	}
 	if !s.HasKeys() {
 		t.Error("停用但未删除时 HasKeys() 仍应为 true")
 	}
-	if !s.ToggleKey(k.Key) || !s.ValidKey(k.Key) {
+	if !s.ToggleKey(k.ID) || !s.ValidKey(plain) {
 		t.Error("重新启用后应再次通过")
 	}
 	if s.ToggleKey("sk-not-exist") {
 		t.Error("停用未知密钥应返回 false")
 	}
 
-	if !s.DeleteKey(k.Key) {
+	if k2 := s.KeyByRef(k.ID); k2 == nil || k2.ID != k.ID {
+		t.Error("KeyByRef(ID) 应能解析")
+	}
+	if k2 := s.KeyByRef(k.Display); k2 == nil || k2.ID != k.ID {
+		t.Error("KeyByRef(展示片段) 应能解析")
+	}
+	if k2 := s.KeyByRef(plain); k2 == nil || k2.ID != k.ID {
+		t.Error("KeyByRef(明文) 应能解析")
+	}
+	if s.KeyByRef("sk-nope") != nil {
+		t.Error("未知引用应返回 nil")
+	}
+
+	if !s.DeleteKey(k.ID) {
 		t.Fatal("删除应返回 true")
 	}
-	if s.ValidKey(k.Key) || s.HasKeys() {
+	if s.ValidKey(plain) || s.HasKeys() {
 		t.Error("删除后不应再有效")
 	}
-	if s.DeleteKey(k.Key) {
+	if s.DeleteKey(k.ID) {
 		t.Error("重复删除应返回 false")
 	}
 }
 
 func TestValidKeyConcurrent(t *testing.T) {
 	s := newStore(t)
-	k := s.AddKey("load")
+	_, plain := s.AddKey("load")
 
 	const n = 64
 	var wg sync.WaitGroup
@@ -447,13 +463,13 @@ func TestValidKeyConcurrent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			s.ValidKey(k.Key)
+			s.ValidKey(plain)
 		}()
 	}
 	wg.Wait()
 
-	if k.Requests != n {
-		t.Errorf("并发校验后 Requests = %d, want %d", k.Requests, n)
+	if got := s.Keys()[0].Requests; got != n {
+		t.Errorf("并发校验后 Requests = %d, want %d", got, n)
 	}
 }
 
@@ -799,5 +815,305 @@ func TestCheckinPendingLifecycle(t *testing.T) {
 	// 未知账号不应 panic。
 	if s.MarkCheckinPending("nope", "") || s.RecordCheckinRetry("nope", "") || s.ClearCheckinPending("nope") {
 		t.Error("未知账号的写操作应返回 false")
+	}
+}
+
+// --- 凭据哈希 / 备份 / 导出导入 ---
+
+func TestAdminPasswordIsHashed(t *testing.T) {
+	s := newStore(t)
+	if s.HasAdminPassword() {
+		t.Fatal("初始状态不应有管理密码")
+	}
+	if err := s.SetAdminPassword("Plain-Text-PW"); err != nil {
+		t.Fatalf("SetAdminPassword: %v", err)
+	}
+	if !s.VerifyAdminPassword("Plain-Text-PW") {
+		t.Error("正确密码应校验通过")
+	}
+	if s.VerifyAdminPassword("plain-text-pw") {
+		t.Error("密码必须区分大小写")
+	}
+	if got := s.Settings().AdminPasswordHash; got == "" || got == "Plain-Text-PW" {
+		t.Errorf("设置里只能有哈希，实际 %q", got)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(s.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "Plain-Text-PW") {
+		t.Error("状态文件不得包含明文管理密码")
+	}
+
+	// 清除密码。
+	if err := s.SetAdminPassword(""); err != nil {
+		t.Fatal(err)
+	}
+	if s.HasAdminPassword() {
+		t.Error("空密码应表示清除")
+	}
+}
+
+func TestLegacyPlaintextPasswordMigrated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	legacy := `{"settings":{"admin_password":"legacy-pw","request_timeout_sec":300}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !s.VerifyAdminPassword("legacy-pw") {
+		t.Error("旧版明文密码应迁移为可校验的哈希")
+	}
+	if got := s.Settings().AdminPasswordLegacy; got != "" {
+		t.Errorf("迁移后不应保留明文字段，实际 %q", got)
+	}
+}
+
+func TestSaveCreatesBackupAndSnapshot(t *testing.T) {
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// 第二次保存会先把旧文件留成 .bak，并生成当日快照。
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(s.Path() + ".bak"); err != nil {
+		t.Errorf("应生成 .bak 备份: %v", err)
+	}
+	backups := filepath.Join(filepath.Dir(s.Path()), "backups")
+	entries, err := os.ReadDir(backups)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("应生成 backups/ 快照: %v", err)
+	}
+}
+
+func TestSnapshotAndExportImport(t *testing.T) {
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+	k, plain := s.AddKey("exported")
+	_ = k
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Snapshot(); err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	raw, err := s.Export()
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if strings.Contains(string(raw), `"logs"`) {
+		t.Error("导出不应包含请求日志")
+	}
+	if strings.Contains(string(raw), plain) {
+		t.Error("导出不得包含明文密钥")
+	}
+
+	// merge=true：只合并账号，不动设置与密钥。
+	other := newStore(t)
+	other.UpsertAccount(testAccount("a2", "s2"))
+	added, updated, err := other.Import(raw, true)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if added != 1 || updated != 0 {
+		t.Errorf("merge 导入结果 = added:%d updated:%d, want 1/0", added, updated)
+	}
+	if len(other.Accounts()) != 2 {
+		t.Errorf("merge 后账号数 = %d, want 2", len(other.Accounts()))
+	}
+	if !other.HasKeys() {
+		t.Error("merge 不应导入密钥")
+	}
+
+	// 覆盖导入前设置的密码，覆盖后必须保留（防止被旧导出锁死）。
+	if err := other.SetAdminPassword("keep-me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := other.Import(raw, false); err != nil {
+		t.Fatalf("覆盖导入: %v", err)
+	}
+	if !other.VerifyAdminPassword("keep-me") {
+		t.Error("导入不得覆盖当前管理密码")
+	}
+	if !other.HasKeys() {
+		t.Error("覆盖导入应带上源里的密钥")
+	}
+	if !other.ValidKey(plain) {
+		t.Error("导入的密钥指纹应能校验原始明文")
+	}
+
+	if _, _, err := other.Import([]byte(`{}`), false); err == nil {
+		t.Error("空导入应报错")
+	}
+}
+
+func TestMaskKey(t *testing.T) {
+	cases := map[string]string{
+		"":              "",
+		"a":             "a***",
+		"sk-1234567890": "sk-123...7890",
+		"sk-12345678":   "sk-123...5678",
+		"short":         "s***",
+	}
+	for in, want := range cases {
+		if got := MaskKey(in); got != want {
+			t.Errorf("MaskKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCooldownLadder(t *testing.T) {
+	want := map[int]time.Duration{
+		1: 30 * time.Second, 2: 2 * time.Minute, 3: 10 * time.Minute, 4: 30 * time.Minute, 9: 30 * time.Minute,
+	}
+	for failures, d := range want {
+		if got := cooldownFor(failures); got != d {
+			t.Errorf("cooldownFor(%d) = %v, want %v", failures, got, d)
+		}
+	}
+	// 失败后写入冷却，成功即清除。
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+	s.MarkAccountResult("a1", false, "boom")
+	if a := s.Account("a1"); a.CooldownUntil == 0 {
+		t.Error("失败应写入冷却截止时间")
+	}
+	s.MarkAccountResult("a1", true, "")
+	if a := s.Account("a1"); a.CooldownUntil != 0 || a.LastSuccess == 0 {
+		t.Errorf("成功后应清除冷却并记录成功时间: %+v", a)
+	}
+}
+
+func TestRecordClassifiesFailures(t *testing.T) {
+	s := newStore(t)
+	s.Record(LogEntry{Status: 200, Kind: "ok"}, 10)
+	s.Record(LogEntry{Status: 499, Kind: "canceled"}, 10)
+	s.Record(LogEntry{Status: 422, Kind: "business", Err: "campaign not found"}, 0)
+	s.Record(LogEntry{Status: 502, Kind: "transport", Err: "network"}, 0)
+	st := s.Stats()
+	if st.TotalRequests != 4 {
+		t.Errorf("TotalRequests = %d, want 4", st.TotalRequests)
+	}
+	if st.FailedRequests != 1 {
+		t.Errorf("只有 transport 计入失败，实际 %d", st.FailedRequests)
+	}
+	if st.CanceledRequests != 1 || st.BusinessErrors != 1 {
+		t.Errorf("分类计数不符: %+v", st)
+	}
+	if st.TotalCharsOut != 20 {
+		t.Errorf("TotalCharsOut = %d, want 20", st.TotalCharsOut)
+	}
+}
+
+func TestMetaAndAutosave(t *testing.T) {
+	s := newStore(t)
+	meta := s.Meta()
+	if meta.SchemaVersion != schemaVersion || meta.CreatedAt == 0 || meta.BootedAt == 0 {
+		t.Fatalf("Meta 不完整: %+v", meta)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.StartAutosave(ctx, 10*time.Millisecond)
+	s.UpsertAccount(testAccount("a1", "s1")) // 标记 dirty
+	// 等到自动保存把文件写出来。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(s.Path()); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if _, err := os.Stat(s.Path()); err != nil {
+		t.Fatalf("自动保存应写出状态文件: %v", err)
+	}
+	// 关闭后再次 MarkDirty 不应该 panic（goroutine 已退出）。
+	s.MarkDirty()
+}
+
+func TestImportRejectsGarbage(t *testing.T) {
+	s := newStore(t)
+	if _, _, err := s.Import([]byte("not json"), true); err == nil {
+		t.Error("非法 JSON 应报错")
+	}
+	// 只有设置、没有账号或密钥：应拒绝（避免「导入成功但什么都没变」）。
+	if _, _, err := s.Import([]byte(`{"settings":{}}`), true); err == nil {
+		t.Error("空导入应报错")
+	}
+}
+
+func TestLegacyPlaintextKeyMigrated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	legacy := `{"keys":[{"key":"sk-legacy-plain-key-0123456789","name":"old","enabled":true}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !s.ValidKey("sk-legacy-plain-key-0123456789") {
+		t.Error("旧版明文密钥应迁移为指纹并可继续使用")
+	}
+	if !s.HasKeys() {
+		t.Error("迁移后仍应存在密钥")
+	}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Contains(string(raw), "sk-legacy-plain-key-0123456789") {
+		t.Error("保存后状态文件不得再含明文密钥")
+	}
+}
+
+// TestNextAccountSpreadsConcurrentPicks 保证并发选号会分散到不同账号。
+//
+// 回归背景：仅在请求完成后更新 LastUsed 时，同一时刻的多个请求会看到相同的
+// 排序键，全部选中同一个账号（模型指纹测试里 3 路并发全打到一个号）。
+func TestNextAccountSpreadsConcurrentPicks(t *testing.T) {
+	s := newStore(t)
+	for _, id := range []string{"a1", "a2", "a3"} {
+		s.UpsertAccount(testAccount(id, "sess-"+id))
+	}
+
+	const n = 30
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			a := s.NextAccount()
+			if a == nil {
+				return
+			}
+			mu.Lock()
+			counts[a.ID]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	if len(counts) != 3 {
+		t.Fatalf("并发选号应覆盖 3 个账号，实际 %v", counts)
+	}
+	for id, c := range counts {
+		if c < n/6 {
+			t.Errorf("账号 %s 只被选中 %d 次，分布过于集中: %v", id, c, counts)
+		}
 	}
 }

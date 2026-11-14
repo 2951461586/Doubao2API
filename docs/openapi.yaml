@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Doubao2API
-  version: "0.1.3"
+  version: "0.1.4"
   description: |
     把本机豆包（DoubaoWork）桌面端的上游服务复刻成 OpenAI 兼容的 Go 网关。
 
@@ -11,7 +11,9 @@ info:
       未签发密钥时「无密钥模式」仅放行本机环回来源（除非开启 `allow_anonymous`）。
 
     错误统一为 `{"error": {"message": ..., "type": ..., "code": ...}}`。
-    上游失败一律映射为 HTTP 502 + `type=upstream_error`。
+    上游失败按分类映射：业务错误 422 `business_error`、账号/网络 502
+    `account_error`/`upstream_error`、超时 504 `timeout_error`，
+    客户端断开 499（仅日志，不写响应）。
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -51,7 +53,7 @@ paths:
   /health:
     get:
       tags: [health]
-      summary: 健康检查
+      summary: 健康检查（永远 200，附可行动告警）
       security: []
       responses:
         "200":
@@ -62,9 +64,55 @@ paths:
                 type: object
                 properties:
                   status: { type: string, example: ok }
+                  degraded: { type: boolean, description: 是否存在需要处理的告警 }
                   accounts: { type: integer, description: 账号总数 }
                   ready: { type: integer, description: 状态为 ok 且启用的账号数 }
                   models: { type: integer, description: 内置模型数 }
+                  non_json_events: { type: integer, description: 被跳过的非 JSON SSE 事件数（协议漂移信号） }
+                  started_at: { type: integer, description: 状态文件创建时间（Unix 秒） }
+                  booted_at: { type: integer, description: 本次进程启动时间（Unix 秒） }
+                  session_warn_days: { type: integer, description: Cookie 到期预警阈值（天） }
+                  warnings:
+                    type: array
+                    description: 可行动告警（Cookie 到期、未设管理密码等）
+                    items:
+                      type: object
+                      properties:
+                        code: { type: string, example: session_expiring }
+                        account_id: { type: string }
+                        account: { type: string }
+                        expires_at: { type: integer }
+                        days_left: { type: integer }
+                        message: { type: string }
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: 就绪检查（供负载均衡使用）
+      description: 没有可用账号时返回 503；否则 200。
+      security: []
+      responses:
+        "200":
+          description: 可以服务
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+                  ready: { type: integer }
+                  accounts: { type: integer }
+        "503":
+          description: 没有可用账号
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: unavailable }
+                  ready: { type: integer }
+                  accounts: { type: integer }
+                  reason: { type: string }
 
   /v1/models:
     get:
@@ -866,6 +914,13 @@ components:
             skill: { type: integer, description: action_bar_skill_id，0 表示无技能 }
             context: { type: integer }
             description: { type: string }
+            model_item_key: { type: string, description: 工作模式模型的上游键；普通对话为空 }
+            agent_mode: { type: integer, description: 1 表示工作模式 }
+            reasoning_levels:
+              type: array
+              description: 客户端为该模型提供的推理档位名（仅展示）
+              items: { type: string }
+              example: [低, 中, 高]
 
     Skill:
       type: object

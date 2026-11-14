@@ -15,11 +15,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"doubao2api/internal/agent"
 	"doubao2api/internal/doubao"
+	"doubao2api/internal/registry"
 	"doubao2api/internal/store"
 	"doubao2api/internal/workturn"
 )
@@ -55,6 +57,123 @@ func mimeByExt(ext string) string {
 	return "application/octet-stream"
 }
 
+// runClientModels 读取桌面端缓存里的模型清单并与 registry 比对。
+//
+// 返回 0 表示一致（或只有「客户端未列出」的本地模型），1 表示存在差异。
+//
+// 注意：同一模型在不同 profile 的缓存里可能给出不同上下文（服务端按实验下发），
+// 因此按 model_item_key 聚合后比对：名称必须完全一致，上下文命中任一
+// 客户端取值即可（registry 只能存一个值）。
+func runClientModels(dir, only string) int {
+	lists, err := doubao.ReadAllClientModels(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "读取客户端模型清单失败:", err)
+		return 1
+	}
+
+	regByKey := make(map[string]registry.Model)
+	for _, m := range registry.Builtin {
+		if m.ModelItemKey != "" {
+			regByKey[m.ModelItemKey] = m
+		}
+	}
+
+	type agg struct {
+		name    string
+		windows map[int]bool
+	}
+	union := make(map[string]*agg)
+	var order []string
+
+	for _, l := range lists {
+		if only != "" && l.Profile != only {
+			continue
+		}
+		captured := "未知"
+		if !l.CapturedAt.IsZero() {
+			captured = l.CapturedAt.Format("2006-01-02 15:04:05")
+		}
+		fmt.Println()
+		fmt.Printf("== %s  缓存时间 %s  默认模型 %s", l.Profile, captured, l.DefaultModelKey)
+		fmt.Println()
+		fmt.Printf("   %-28s %-42s %-7s %s", "客户端名称", "model_item_key", "上下文", "状态")
+		fmt.Println()
+		for _, m := range l.Models {
+			a := union[m.ModelItemKey]
+			if a == nil {
+				a = &agg{name: m.Name, windows: map[int]bool{}}
+				union[m.ModelItemKey] = a
+				order = append(order, m.ModelItemKey)
+			}
+			if m.TotalWindow > 0 {
+				a.windows[m.TotalWindow] = true
+			}
+			status := "OK"
+			if _, ok := regByKey[m.ModelItemKey]; !ok {
+				status = "registry 缺失"
+			} else if regByKey[m.ModelItemKey].Name != m.Name {
+				status = "名称不一致"
+			}
+			fmt.Printf("   %-28s %-42s %-7d %s", m.Name, m.ModelItemKey, m.TotalWindow, status)
+			fmt.Println()
+		}
+	}
+
+	drift := 0
+	for _, key := range order {
+		a := union[key]
+		reg, ok := regByKey[key]
+		if !ok {
+			drift++
+			fmt.Printf("✗ %s：registry 缺少该 model_item_key", key)
+			fmt.Println()
+			continue
+		}
+		if reg.Name != a.name {
+			drift++
+			fmt.Printf("✗ %s：名称 registry=%q 客户端=%q", key, reg.Name, a.name)
+			fmt.Println()
+		}
+		if len(a.windows) > 0 && !a.windows[reg.Context] {
+			drift++
+			fmt.Printf("✗ %s：上下文 registry=%d 客户端=%v", key, reg.Context, sortedInts(a.windows))
+			fmt.Println()
+		}
+	}
+
+	// registry 里带 model_item_key、但客户端清单没有的模型：可能已下线。
+	var stale []string
+	for key, m := range regByKey {
+		if _, ok := union[key]; !ok {
+			stale = append(stale, fmt.Sprintf("%s(%s)", m.ID, key))
+		}
+	}
+	if len(stale) > 0 {
+		sort.Strings(stale)
+		fmt.Println()
+		fmt.Println("客户端未列出（可能已下线）：" + strings.Join(stale, ", "))
+	}
+	if drift > 0 {
+		fmt.Println()
+		fmt.Printf("存在 %d 处差异：更新 internal/registry/registry.go 后重跑本命令。", drift)
+		fmt.Println()
+		return 1
+	}
+	fmt.Println()
+	fmt.Println("模型清单已对齐。")
+	return 0
+}
+
+// sortedInts 返回升序的整数切片（用于稳定输出）。
+func sortedInts(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Ints(out)
+	return out
+}
+
 func main() {
 	data := flag.String("data", "doubao2api-data.json", "状态文件")
 	path := flag.String("path", "", "上游路径")
@@ -79,7 +198,27 @@ func main() {
 	allow := flag.String("allow", "go,git", "命令白名单（逗号分隔，配合 -shell）")
 	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
 	maxOut := flag.Int("max", 200000, "JSON 打印上限（字节，0 = 不截断）")
+	listModels := flag.Bool("models", false, "打印模型清单（ID / 名称 / 上游 model_item_key / 模式）后退出")
+	clientModels := flag.Bool("client-models", false, "读取本机客户端缓存里的模型清单，并与 registry 比对后退出")
+	clientDir := flag.String("client-dir", "", "DoubaoWork User Data 目录（留空自动探测）")
+	clientProfile := flag.String("client-profile", "", "只比对指定 profile（留空比对全部）")
 	flag.Parse()
+
+	if *listModels {
+		fmt.Printf("%-22s %-24s %-40s %s\n", "ID", "名称", "上游 model_item_key", "模式")
+		for _, m := range registry.List(nil) {
+			mode := "普通对话"
+			if m.AgentMode == 1 {
+				mode = "工作模式"
+			}
+			fmt.Printf("%-22s %-24s %-40s %s\n", m.ID, m.Name, m.ModelItemKey, mode)
+		}
+		return
+	}
+
+	if *clientModels {
+		os.Exit(runClientModels(*clientDir, *clientProfile))
+	}
 
 	st, err := store.Open(*data)
 	if err != nil {

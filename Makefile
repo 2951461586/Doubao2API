@@ -12,7 +12,7 @@ LDFLAGS  := -s -w -X main.version=$(VERSION)
 GOFLAGS  :=
 PKGS     := ./...
 
-.PHONY: all build run fmt fmt-check vet test race cover check docker probe dist release clean help
+.PHONY: all build run fmt fmt-check vet test race cover cover-gate fuzz check docker probe dist release clean help
 
 all: check build
 
@@ -42,6 +42,13 @@ cover: ## 覆盖率（生成 coverage.out 与 HTML）
 	go tool cover -func=coverage.out | tail -1
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "报告：coverage.html"
+
+cover-gate: ## 覆盖率门槛（CI 同款）
+	go test -count=1 -coverprofile=coverage.out $(PKGS)
+	@sh scripts/coverage-gate.sh coverage.out
+
+fuzz: ## SSE 分帧器模糊测试（默认 30 秒）
+	go test ./internal/doubao -run '^$$' -fuzz FuzzReadSSE -fuzztime 30s
 
 check: fmt-check vet race ## CI 同款校验
 

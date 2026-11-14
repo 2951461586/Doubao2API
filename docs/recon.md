@@ -371,23 +371,33 @@ Web 端走 `POST /samantha/chat/completion`；网关用 `POST /chat/completion`
 | `option.sse_recv_event_options.support_chunk_delta` | `true` |
 | `enable_sandbox` | headless 场景必须 `false`（沙箱在客户端本地） |
 
-工作模式可用模型（`model_item_key`，参考项目逐个实测）：
+工作模式可用模型（`model_item_key`，已从本机客户端缓存逐个核对）：
 
-| 对外名 | model_item_key | 备注 |
-| --- | --- | --- |
-| `auto` | `9` | 免费 |
-| `doubao-2.1-lite` | `seed-lite-7b` | 256k |
-| `doubao-2.1-pro` | `5` | 256k |
-| `deepseek-v4-flash` | `person-deepseek-v4-1-flash-261017` | **默认** |
-| `deepseek-v4-pro` | `person-deepseek-v4-pro-ga-260813` | |
-| `kimi-k3` | `person-kimi-k3-261111` | |
-| `kimi-k3.1-pro` | `person-kimi-k3-1-pro-261111` | |
-| `kimi-k3.1-pro-fast` | `person-kimi-k3-1-pro-highspeed-261111` | |
-| `glm-5.3` / `glm-5.3-flash` | `person-glm-5-3-261111` / `…-flash-261111` | 上游报错话术，疑未开通 |
+| 对外名 | model_item_key | 上下文 | 备注 |
+| --- | --- | ---: | --- |
+| `自动` | `9` | 256k | 客户端默认（`default_select_model_item_key`） |
+| `豆包 2.1 Lite` | `seed-lite-7b` | 256k | `memory_profile=256k` |
+| `豆包 2.1 Pro` | `5` | 256k | |
+| `DeepSeek V4.1 Flash` | `person-deepseek-v4-1-flash-261017` | 300k | 工作模式默认档 |
+| `Kimi K3.1 Pro` | `person-kimi-k3-1-pro-261111` | 300k | |
+| `Kimi K3.1 Pro 高速` | `person-kimi-k3-1-pro-highspeed-261111` | 300k | |
+| `Kimi K3` | `person-kimi-k3-261111` | 300k | |
+| `GLM 5.3` | `person-glm-5-3-261111` | 300k | |
+| `GLM 5.3 Flash` | `person-glm-5-3-flash-261111` | 300k | |
+| `DeepSeek V4 Pro` | `person-deepseek-v4-pro-ga-260813` | 300k | 上游键是 GA 版，不是 V4.1 |
 
-> 清单来源是**客户端缓存** `_DesktopActionBarBriefListRequestCacheDataV1` 里的
-> `modeSelectData.menuConfV2.mode_list`，不是接口下发 —— 这也解释了为什么
-> `/v1/models` 里没有 DeepSeek / Kimi：它们是**工作模式**的模型，普通对话不存在这些型号。
+> 以上清单来自 `Preferences` 里的
+> `saman.local_storage_for_web["frontend-request-cache"]` →
+> `_DesktopActionBarBriefListRequestCacheDataV1.data.modeSelectData`
+> （2026-11-14 从本机 Default / Profile 2 / Profile 3 缓存读取）。
+> 解析实现见 `internal/doubao/client_models.go`；
+> `doubao2api-probe -client-models` 会打印各 profile 的清单并与
+> `internal/registry` 做差异比对。注意 `自动` 的上下文在不同 profile 可能
+> 是 256k 或 300k（服务端按实验下发），registry 取保守值 256k。
+>
+> 这份清单位于 `modeSelectData.menuConfV2.mode_list`，**不是接口下发**——
+> 它由客户端写入本地缓存。这些型号属于工作模式（`agent_mode=1`），
+> 网关现在把它们一并暴露在 `/v1/models` 里，并带上 `model_item_key`。
 
 **本项目的尝试与结论**：按上述字段（含 `agent_mode=1`、`conversation_mode=2`、
 `mode_id`、三处一致的 `model_item_key`、`enable_sandbox=false`、最小 option 字段集）
@@ -673,6 +683,37 @@ curl -X POST http://127.0.0.1:10086/admin/api/settings -H 'Content-Type: applica
 2. **`a_bogus` 可选签名**：参考项目预留了该项（配置注入），默认不启用；
    若哪天遇到风控类拒绝，可作为兜底手段。
 
+## 模型指纹实测（2026-11-14）
+
+用 lm.ikale.io 的官方 CLI `npx lmfpd` 直连本网关做整数指纹检测
+（挑战：凭第一反应写出约 300 个 1–355 的整数；参考库 70 个模型）。
+CLI 自带算法与参考库，密钥只发往本机网关，不会交给第三方站点。
+
+单样本只给排名、噪声很大，因此关键模型用 **3 样本校准**：
+
+| 网关模型 | 指纹最高匹配 | 置信度 | 结论 |
+| --- | --- | ---: | --- |
+| `deepseek-v4-flash` | deepseek-v4.1-flash-1017 | 99.3% | 名实相符 |
+| `deepseek-v4-pro` | deepseek-v4-pro | 93.0% | 名实相符 |
+| `auto` / `doubao-2.1-lite` / `doubao-2.1-pro` | seed-2.0-lite | 53%–90% | 符合预期（豆包 Seed） |
+| `kimi-k3` | seed-2.0-lite | 50.2% | 未路由到 Kimi |
+| `kimi-k3.1-pro` | seed-2.0-lite | 98.1% | 未路由到 Kimi |
+| `kimi-k3.1-pro-fast` | mimo-v2.6-flash（Seed 并列） | 37.4% | 未路由到 Kimi |
+| `glm-5.3` / `glm-5.3-flash` | seed-2.0-lite | 单样本 | 未路由到 GLM |
+
+复现方式（`-a cc` 走 Chat Completions，`-ns` 用非流式）：
+
+```bash
+npx lmfpd@latest -b http://127.0.0.1:10086/v1 -k sk-...   -m deepseek-v4-pro -a cc -ns --count 3 --json --output result.json
+npx lmfpd@latest --input result.json --json   # 离线重算
+```
+
+**结论**：`model_item_key` 的注入链路是正确的（DeepSeek 两个键都高置信命中），
+但 `person-kimi-*` / `person-glm-*` 在当前三个账号上未被上游兑现——返回 200 与
+正常正文，实际指纹落在 Seed / MiMo。另有两个账号对工作模式模型稳定返回
+`710022004 rate limited`，实际只有 1 个账号在服务。要在网关上「名实相符」，
+需先在桌面端确认这些模型的账号权限/实验开关，再决定是否对外暴露。
+
 ## 项目结构
 
 > 以下为当前实际布局（`internal/` 下按职责拆分，单个文件不再超过 ~700 行）。
@@ -695,16 +736,36 @@ doubao2api/
 │   │   ├── stream_blocks.go       # 块类型注册表（30 种 block_type 的分派）
 │   │   ├── blocks.go              # 块内容解析（搜索来源 / 代码 / 产物 / 音乐）
 │   │   ├── skills.go              # 技能元数据 + /samantha/skill/list + postJSON
+│   │   ├── errors.go              # 上游错误分型（business/account/timeout/canceled/transport）
+│   │   ├── client_models.go       # 读桌面端缓存里的模型清单（Preferences → modeSelectData）
 │   │   ├── rewards.go             # 积分 / 签到 / 激励任务
 │   │   ├── endpoints.go           # 会话 / 歌词等 JSON 端点
 │   │   ├── upload.go              # 图片转存：prepare_upload + imageX 直传（SigV4）
 │   │   ├── video.go               # 文生视频：创意画布 exec + 幂等轮询
 │   │   ├── music.go               # 音乐：input_skill 结构 + get_video 音频解析
 │   │   └── client.go              # 公参、请求头、请求体构造
-│   ├── store/store.go             # 持久化：账号池、密钥、设置、统计、日志
+│   ├── secret/secret.go           # PBKDF2 口令哈希 + SHA-256 密钥指纹（零依赖）
+│   ├── store/                     # 持久化（按职责拆分）
+│   │   ├── store.go               # 类型定义 / Open / schema 迁移 / 元信息
+│   │   ├── persist.go             # Save / .bak / 按日快照 / 导出导入 / 自动落盘
+│   │   ├── accounts.go            # 账号池调度（冷却 / 并发分散 / 签到与任务状态）
+│   │   ├── keys.go                # 密钥指纹 CRUD + 管理密码哈希
+│   │   └── logs.go                # 设置 / 统计 / 请求日志
 │   ├── registry/registry.go       # 模型清单与别名解析（最长匹配 / 别名链）
 │   └── server/
-│       ├── server.go              # 路由、鉴权、CORS、控制台 API
+│       ├── server.go              # Server 类型、路由表、New
+│       ├── auth.go                # /v1 与 /admin 鉴权、同源校验
+│       ├── trust.go               # 可信代理解析（X-Forwarded-For → 真实来源）
+│       ├── cors.go                # CORS 来源校验
+│       ├── errors.go              # writeJSON / writeErr / 按分类写错误响应
+│       ├── health.go              # /health（告警）+ /readyz
+│       ├── accesslog.go           # 逐请求访问日志 + 日志脱敏
+│       ├── ratelimit.go           # 管理爆破防护 / 按密钥限流
+│       ├── pool.go                # 单账号并发闸门 + 重试退避
+│       ├── helpers.go             # 请求体上限与小工具
+│       ├── models.go              # /v1/models、控制台首页
+│       ├── admin_state.go         # 控制台状态 / 账号 / 设置 / 密钥 / 日志
+│       ├── admin_backup.go        # 状态快照 / 导出 / 导入
 │       ├── upstream.go            # runUpstream：选号 / 超时 / 日志 / 错误响应统一入口
 │       ├── collector.go           # responseCollector：文本与结构化产物汇总去重
 │       ├── chat.go                # /v1/chat/completions（流式 + 阻塞）
@@ -718,9 +779,8 @@ doubao2api/
 │       ├── music.go               # /v1/music/*
 │       ├── login.go               # 扫码登录（passport SSO）
 │       ├── web.go                 # 控制台单页与 favicon 的内嵌及响应头
-│       ├── extras.go              # 空壳：记录杂项端点的拆分去向
 │       ├── web/index.html         # 控制台单页
-│       └── web/favicon.ico        # 控制台图标（16/32/48，内嵌）
+│       └── web/favicon.ico        # 控制台图标（16/24/32/48/64/128/256，内嵌）
 ├── assets/logo.png                # 项目 Logo（README 使用，取自客户端图标）
 ├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
 ├── tools/extract_pak.py           # biz.pak 解包脚本（第一步，可重跑）
@@ -728,6 +788,7 @@ doubao2api/
 ├── docs/                          # 本文档目录（recon / api / security / roadmap / openapi.yaml）
 ├── scripts/
 │   ├── fmt-check.sh               # gofmt 校验（CI 与 make check 共用）
+│   ├── coverage-gate.sh           # 覆盖率门槛（server/doubao/store/account）
 │   ├── release.sh                 # 打 annotated tag（校验 CHANGELOG 小节 + make check）
 │   ├── console-selftest.mjs       # 控制台点击回归（CDP 驱动无头 Chrome）
 │   ├── recon_pak_probe.py         # 按关键字定位 pak 内 blob

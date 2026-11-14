@@ -35,6 +35,9 @@ type chatRequest struct {
 	ModeID          string   `json:"mode_id"`
 	SelectionMode   bool     `json:"selection_mode"`
 	SelectedSkills  []string `json:"selected_skills"`
+	// Tools 目前不被网关支持：显式识别而不是静默丢弃。
+	Tools      json.RawMessage `json:"tools"`
+	ToolChoice json.RawMessage `json:"tool_choice"`
 	// Ext 透传到上游 ext（高级用法）。
 	Ext map[string]any `json:"ext"`
 	// Doubao 兼容嵌套写法：{"doubao":{"agent_mode":…}}。
@@ -66,12 +69,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	var req chatRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
 		return
 	}
 	if len(req.Messages) == 0 {
 		writeErr(w, http.StatusBadRequest, "messages 不能为空", "invalid_request_error")
+		return
+	}
+	if err := rejectUnsupportedTools(w, req.Tools, req.ToolChoice); err != nil {
 		return
 	}
 
@@ -177,8 +183,8 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		})
 	})
 	if err != nil {
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(upReq.Text), 0, err)
-		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
+		s.record(r, key, acct, model.ID, false, start, len(upReq.Text), 0, err)
+		writeErrKind(w, doubao.Classify(err), err.Error())
 		return
 	}
 
@@ -211,7 +217,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 	if len(col.music) > 0 {
 		resp["music"] = col.music
 	}
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), col.length(), nil)
+	s.record(r, key, acct, model.ID, false, start, len(upReq.Text), col.length(), nil)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -222,12 +228,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 		writeErr(w, http.StatusInternalServerError, "服务端不支持流式响应", "server_error")
 		return
 	}
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream; charset=utf-8")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("Connection", "keep-alive")
-	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
 
 	id := "chatcmpl-" + doubao.RandomHex(12)
 	created := time.Now().Unix()
@@ -273,14 +273,31 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 				"finish_reason": "error",
 			}},
 			"error": map[string]any{
-				"type":    "upstream_error",
+				"type":    doubao.Classify(err).ErrorType(),
 				"message": err.Error(),
 			},
 		})
 	}
 
-	// 首块先发 role，符合 OpenAI 约定
-	send(map[string]any{"role": "assistant", "content": ""}, nil)
+	// commit 在产生第一帧时才提交 SSE 头与 200。
+	//
+	// 此前先写 200 再连上游：上游鉴权失败时客户端拿到「200 + 一个多数 SDK
+	// 不解析的 error 帧」，看起来像成功。现在未提交前的错误走普通 JSON 响应。
+	committed := false
+	commit := func() {
+		if committed {
+			return
+		}
+		committed = true
+		h := w.Header()
+		h.Set("Content-Type", "text/event-stream; charset=utf-8")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Connection", "keep-alive")
+		h.Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		// 首块先发 role，符合 OpenAI 约定
+		send(map[string]any{"role": "assistant", "content": ""}, nil)
+	}
 
 	var streamErr error
 	col := newResponseCollector()
@@ -294,6 +311,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 			if err != nil {
 				return err
 			}
+			commit()
 			// 结构化产物逐条下发，便于客户端边收边渲染。
 			if len(d.images) > 0 {
 				send(map[string]any{"images": d.images}, nil)
@@ -322,16 +340,27 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 			return nil
 		})
 	})
+
+	kind := doubao.Classify(err)
 	if err != nil {
 		streamErr = err
-		sendError(err)
+		if !committed {
+			// 还没提交响应头：按普通错误返回（客户端能得到真实状态码）。
+			s.record(r, key, acct, model.ID, true, start, len(upReq.Text), 0, err)
+			writeErrKind(w, kind, err.Error())
+			return
+		}
+		if kind != doubao.KindCanceled {
+			sendError(err)
+		}
 	} else {
+		commit()
 		send(map[string]any{}, "stop")
 	}
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
-	s.record(key, acct, model.ID, true, statusOf(streamErr), start, len(upReq.Text), outLen, streamErr)
+	s.record(r, key, acct, model.ID, true, start, len(upReq.Text), outLen, streamErr)
 }
 
 // withUploadedAttachments 确保每个图片 / 文件附件都有可用于 content_block 的上游 uri。
@@ -537,16 +566,6 @@ func fileAttachmentFromPart(pm map[string]any) (doubao.FileAttachment, bool) {
 		name = "file.bin"
 	}
 	return doubao.FileAttachment{Name: name, Size: int64(len(data)), Data: data}, true
-}
-
-// firstString 返回第一个非空字符串。
-func firstString(vals ...any) string {
-	for _, v := range vals {
-		if s, ok := v.(string); ok && s != "" {
-			return s
-		}
-	}
-	return ""
 }
 
 // newCreationURLs 提取尚未出现过的生成产物 URL。

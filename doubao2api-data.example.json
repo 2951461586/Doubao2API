@@ -1,4 +1,9 @@
 {
+  "meta": {
+    "schema_version": 2,
+    "created_at": 1763000000,
+    "booted_at": 1763100000
+  },
   "accounts": [
     {
       "id": "0123456789abcdef",
@@ -7,7 +12,7 @@
       "cookies": {
         "sessionid": "<占位：32 位十六进制会话 ID>",
         "sessionid_ss": "<占位>",
-        "sid_guard": "<占位>",
+        "sid_guard": "<占位：session|<创建时间戳>|<TTL 秒>|<…>>",
         "sid_tt": "<占位>",
         "uid_tt": "<占位>",
         "uid_tt_ss": "<占位>",
@@ -35,6 +40,8 @@
       "last_used": 0,
       "last_err": "",
       "failures": 0,
+      "cooldown_until": 0,
+      "last_success": 0,
       "pending_checkin_date": "",
       "pending_checkin_at": 0,
       "pending_checkin_tries": 0
@@ -42,7 +49,9 @@
   ],
   "keys": [
     {
-      "key": "sk-<占位：控制台签发的调用密钥>",
+      "id": "a1b2c3d4",
+      "key_hash": "<占位：SHA-256(sk-...)，完整密钥只在创建时返回一次>",
+      "display": "sk-abc...wxyz",
       "name": "default",
       "enabled": true,
       "created_at": 0,
@@ -55,10 +64,17 @@
       "gpt-4o": "doubao"
     },
     "request_timeout_sec": 300,
+    "overall_timeout_sec": 600,
     "max_retries": 3,
     "log_keep": 500,
     "cors_origin": "",
-    "admin_password": "",
+    "admin_password_hash": "<占位：pbkdf2-sha256$…，不要填明文>",
+    "trusted_proxies": "",
+    "admin_loopback_only": true,
+    "session_warn_days": 14,
+    "max_concurrent_per_account": 2,
+    "rate_limit_per_key": 0,
+    "tools_policy": "reject",
     "auto_checkin": false,
     "auto_claim_tasks": false,
     "auto_do_tasks": false,
@@ -69,6 +85,8 @@
   "stats": {
     "total_requests": 0,
     "failed_requests": 0,
+    "canceled_requests": 0,
+    "business_errors": 0,
     "total_chars_out": 0,
     "started_at": 0
   },
