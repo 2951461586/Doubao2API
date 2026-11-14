@@ -31,8 +31,6 @@ func (s *Server) handleMusicAudio(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "仅支持 POST", "invalid_request_error")
 		return
 	}
-	start := time.Now()
-
 	var req musicAudioRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
@@ -44,30 +42,75 @@ func (s *Server) handleMusicAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := s.Store.Settings()
-	model := registry.Resolve("", settings.ModelAliases)
-	key := extractKey(r)
-	timeout := s.requestTimeout()
+	model := registry.Resolve("", s.Store.Settings().ModelAliases)
 
 	var url string
-	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		u, err := s.Up.MusicAudio(ctx, acct, videoID)
-		if err != nil {
-			return err
-		}
-		url = u
-		return nil
-	})
-	if err != nil {
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(videoID), 0, err)
-		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
+	if _, ok := s.runUpstream(w, r, upstreamCall{Label: model.ID, InLen: len(videoID)},
+		func(ctx context.Context, acct *doubao.Account) (int, error) {
+			u, err := s.Up.MusicAudio(ctx, acct, videoID)
+			if err != nil {
+				return 0, err
+			}
+			url = u
+			return 1, nil
+		}); !ok {
 		return
 	}
 
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(videoID), 1, nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created":  time.Now().Unix(),
 		"video_id": videoID,
 		"url":      url,
+	})
+}
+
+type lyricsRequest struct {
+	Prompt string `json:"prompt"`
+	Theme  string `json:"theme"`
+	Genre  string `json:"genre"`
+	Mood   string `json:"mood"`
+	Lyric  string `json:"lyric"`
+}
+
+// handleMusicLyrics 是 POST /v1/music/lyrics 的入口。
+//
+// 上游：/alice/media/bigmusic/lyrics_web（带 genre/mood）或 /lyrics（仅 prompt）。
+
+func (s *Server) handleMusicLyrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "仅支持 POST", "invalid_request_error")
+		return
+	}
+	var req lyricsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
+		return
+	}
+	prompt := strings.TrimSpace(firstNonEmpty(req.Prompt, req.Theme, req.Lyric))
+	if prompt == "" {
+		writeErr(w, http.StatusBadRequest, "prompt 不能为空", "invalid_request_error")
+		return
+	}
+
+	var lines []string
+	if _, ok := s.runUpstream(w, r, upstreamCall{Label: "music-lyrics", InLen: len(prompt)},
+		func(ctx context.Context, acct *doubao.Account) (int, error) {
+			out, err := s.Up.MusicLyrics(ctx, acct, prompt, req.Genre, req.Mood)
+			if err != nil {
+				return 0, err
+			}
+			lines = out
+			return len(out), nil
+		}); !ok {
+		return
+	}
+	data := make([]map[string]any, 0, len(lines))
+	for i, line := range lines {
+		data = append(data, map[string]any{"index": i, "text": line})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"created": time.Now().Unix(),
+		"prompt":  prompt,
+		"data":    data,
 	})
 }

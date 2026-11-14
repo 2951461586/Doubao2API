@@ -38,8 +38,6 @@ func (s *Server) handleVideoGenerations(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusMethodNotAllowed, "仅支持 POST", "invalid_request_error")
 		return
 	}
-	start := time.Now()
-
 	var req videoGenRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
@@ -51,12 +49,7 @@ func (s *Server) handleVideoGenerations(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	settings := s.Store.Settings()
-	model := registry.Resolve(req.Model, settings.ModelAliases)
-	key := extractKey(r)
-
-	// 视频生成远慢于对话，在通用超时之上再兜一个下限
-	timeout := max(s.requestTimeout(), videoGenTimeout)
+	model := registry.Resolve(req.Model, s.Store.Settings().ModelAliases)
 
 	upReq := doubao.VideoRequest{
 		Prompt:   prompt,
@@ -65,27 +58,24 @@ func (s *Server) handleVideoGenerations(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var result *doubao.VideoResult
-	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
+	if _, ok := s.runUpstream(w, r, upstreamCall{
+		Label:      model.ID,
+		InLen:      len(prompt),
+		MinTimeout: videoGenTimeout, // 视频生成远慢于对话
+	}, func(ctx context.Context, acct *doubao.Account) (int, error) {
 		res, err := s.Up.GenerateVideo(ctx, acct, upReq, nil)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		result = res
-		return nil
-	})
-	if err != nil {
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(prompt), 0, err)
-		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
-		return
-	}
-	if result == nil || result.URL == "" {
-		err := fmt.Errorf("上游未返回视频地址")
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(prompt), 0, err)
-		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
+		if res == nil || res.URL == "" {
+			return 0, fmt.Errorf("上游未返回视频地址")
+		}
+		return 1, nil
+	}); !ok {
 		return
 	}
 
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(prompt), 1, nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
 		"data": []any{map[string]any{

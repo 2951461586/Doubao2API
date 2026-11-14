@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,8 +36,6 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusMethodNotAllowed, "仅支持 POST", "invalid_request_error")
 		return
 	}
-	start := time.Now()
-
 	var req imageGenRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error(), "invalid_request_error")
@@ -55,10 +54,7 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 		n = 4
 	}
 
-	settings := s.Store.Settings()
-	model := registry.Resolve(req.Model, settings.ModelAliases)
-	key := extractKey(r)
-	timeout := s.requestTimeout()
+	model := registry.Resolve(req.Model, s.Store.Settings().ModelAliases)
 
 	upReq := doubao.ChatRequest{
 		Text:       imageSkillPrompt(prompt, req.Style, req.Size),
@@ -68,31 +64,29 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 
 	seen := map[string]bool{}
 	var urls []string
-	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
-		return s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
-			if c.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
-			}
-			for _, cr := range c.Creations {
-				if cr.URL == "" || seen[cr.ID] {
-					continue
+	if _, ok := s.runUpstream(w, r, upstreamCall{Label: model.ID, InLen: len(prompt)},
+		func(ctx context.Context, acct *doubao.Account) (int, error) {
+			err := s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
+				if c.ErrorCode != 0 {
+					return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
 				}
-				seen[cr.ID] = true
-				urls = append(urls, cr.URL)
+				for _, cr := range c.Creations {
+					if cr.URL == "" || seen[cr.ID] {
+						continue
+					}
+					seen[cr.ID] = true
+					urls = append(urls, cr.URL)
+				}
+				return nil
+			})
+			if err != nil {
+				return 0, err
 			}
-			return nil
-		})
-	})
-	if err != nil {
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(prompt), 0, err)
-		writeErr(w, http.StatusBadGateway, err.Error(), "upstream_error")
-		return
-	}
-	if len(urls) == 0 {
-		err := fmt.Errorf("上游未返回图片")
-		s.record(key, acct, model.ID, false, http.StatusBadGateway, start, len(prompt), 0, err)
-		writeErr(w, http.StatusBadGateway,
-			"上游未返回图片（该账号可能无图像生成权限，或提示词未触发图像技能）", "upstream_error")
+			if len(urls) == 0 {
+				return 0, errNoImage
+			}
+			return len(urls), nil
+		}); !ok {
 		return
 	}
 	if len(urls) > n {
@@ -110,12 +104,16 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 		data = append(data, map[string]any{"url": u})
 	}
 
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(prompt), len(urls), nil)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"created": time.Now().Unix(),
 		"data":    data,
 	})
 }
+
+// errNoImage 表示上游没有回传任何图片产物。
+//
+// 常见原因：账号无图像生成权限，或提示词没有触发图像技能。
+var errNoImage = errors.New("上游未返回图片（该账号可能无图像生成权限，或提示词未触发图像技能）")
 
 // imageSkillPrompt 套用桌面端「图像生成」技能的默认模板
 // （/samantha/skill/list 中 skill_type=3 的 default_prompt 为

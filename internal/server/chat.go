@@ -12,7 +12,6 @@ import (
 
 	"doubao2api/internal/doubao"
 	"doubao2api/internal/registry"
-	"doubao2api/internal/store"
 )
 
 // chatRequest 是 OpenAI Chat Completions 的请求体（仅取所需字段）。
@@ -160,59 +159,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // blockingChat 收集完整回复后一次性返回。
 func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doubao.ChatRequest, model registry.Model, key string, timeout time.Duration, start time.Time) {
-	var (
-		out          strings.Builder
-		thinking     strings.Builder
-		convID       string
-		imageURLs    []string
-		seenCreation = map[string]bool{}
-		sources      []doubao.SearchSource
-		artifacts    []doubao.Artifact
-		music        []*doubao.MusicMessage
-		seenSource   = map[string]bool{}
-		seenArtifact = map[string]bool{}
-		seenMusic    = map[string]bool{}
-	)
-
+	col := newResponseCollector()
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
 		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
-			if c.ConvID != "" {
-				convID = c.ConvID
-			}
-			if c.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
-			}
-			imageURLs = append(imageURLs, newCreationURLs(c.Creations, seenCreation)...)
-			for _, src := range c.Sources {
-				key := src.URL + "|" + src.Title
-				if src.URL == "" || seenSource[key] {
-					continue
-				}
-				seenSource[key] = true
-				sources = append(sources, src)
-			}
-			for _, a := range c.Artifacts {
-				key := a.ResourceID + a.ArtifactID + a.Title
-				if seenArtifact[key] {
-					continue
-				}
-				seenArtifact[key] = true
-				artifacts = append(artifacts, a)
-			}
-			if c.Music != nil {
-				key := c.Music.VideoID + c.Music.Title
-				if !seenMusic[key] {
-					seenMusic[key] = true
-					music = append(music, c.Music)
-				}
-			}
-			out.WriteString(c.Text)
-			thinking.WriteString(c.Thinking)
-			return nil
+			_, err := col.absorb(c)
+			return err
 		})
 	})
 	if err != nil {
@@ -221,9 +176,9 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 		return
 	}
 
-	msg := map[string]any{"role": "assistant", "content": out.String()}
-	if thinking.Len() > 0 {
-		msg["reasoning_content"] = thinking.String()
+	msg := map[string]any{"role": "assistant", "content": col.text()}
+	if t := col.thinkingText(); t != "" {
+		msg["reasoning_content"] = t
 	}
 	resp := map[string]any{
 		"id":      "chatcmpl-" + doubao.RandomHex(12),
@@ -235,22 +190,22 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, upReq doub
 			"message":       msg,
 			"finish_reason": "stop",
 		}},
-		"usage":           estimateUsage(upReq.Text, out.String()),
-		"conversation_id": convID,
+		"usage":           estimateUsage(upReq.Text, col.text()),
+		"conversation_id": col.convID,
 	}
-	if len(imageURLs) > 0 {
-		resp["images"] = imageURLs
+	if len(col.imageURLs) > 0 {
+		resp["images"] = col.imageURLs
 	}
-	if len(sources) > 0 {
-		resp["sources"] = sources
+	if len(col.sources) > 0 {
+		resp["sources"] = col.sources
 	}
-	if len(artifacts) > 0 {
-		resp["artifacts"] = artifacts
+	if len(col.artifacts) > 0 {
+		resp["artifacts"] = col.artifacts
 	}
-	if len(music) > 0 {
-		resp["music"] = music
+	if len(col.music) > 0 {
+		resp["music"] = col.music
 	}
-	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), out.Len(), nil)
+	s.record(key, acct, model.ID, false, http.StatusOK, start, len(upReq.Text), col.length(), nil)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -296,44 +251,29 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	send(map[string]any{"role": "assistant", "content": ""}, nil)
 
 	var streamErr error
-	seenCreation := map[string]bool{}
-	seenSource := map[string]bool{}
-	seenArtifact := map[string]bool{}
-	seenMusic := map[string]bool{}
+	col := newResponseCollector()
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		req, err := s.withUploadedAttachments(ctx, acct, upReq)
 		if err != nil {
 			return err
 		}
 		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
-			if c.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+			d, err := col.absorb(c)
+			if err != nil {
+				return err
 			}
-			if urls := newCreationURLs(c.Creations, seenCreation); len(urls) > 0 {
-				send(map[string]any{"images": urls}, nil)
+			// 结构化产物逐条下发，便于客户端边收边渲染。
+			if len(d.images) > 0 {
+				send(map[string]any{"images": d.images}, nil)
 			}
-			for _, src := range c.Sources {
-				key := src.URL + "|" + src.Title
-				if src.URL == "" || seenSource[key] {
-					continue
-				}
-				seenSource[key] = true
+			for _, src := range d.sources {
 				send(map[string]any{"sources": []doubao.SearchSource{src}}, nil)
 			}
-			for _, a := range c.Artifacts {
-				key := a.ResourceID + a.ArtifactID + a.Title
-				if seenArtifact[key] {
-					continue
-				}
-				seenArtifact[key] = true
-				send(map[string]any{"artifacts": []doubao.Artifact{a}}, nil)
+			for _, art := range d.artifacts {
+				send(map[string]any{"artifacts": []doubao.Artifact{art}}, nil)
 			}
-			if c.Music != nil {
-				key := c.Music.VideoID + c.Music.Title
-				if !seenMusic[key] {
-					seenMusic[key] = true
-					send(map[string]any{"music": c.Music}, nil)
-				}
+			if d.music != nil {
+				send(map[string]any{"music": d.music}, nil)
 			}
 			if c.ConvID != "" {
 				// 通过额外的 SSE 注释块回传会话 ID，便于客户端续接多轮
@@ -360,51 +300,6 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	flusher.Flush()
 
 	s.record(key, acct, model.ID, true, statusOf(streamErr), start, len(upReq.Text), outLen, streamErr)
-}
-
-// withAccountRetry 选账号并在失败时换号重试。
-//
-// 返回本次实际使用的账号（可能为 nil），供调用方记录日志归属。
-func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn func(context.Context, *doubao.Account) error) (*doubao.Account, error) {
-	accts := s.Store.Accounts()
-	if len(accts) == 0 {
-		return nil, fmt.Errorf("没有可用账号，请先在控制台导入或添加账号")
-	}
-	maxTries := s.Store.Settings().MaxRetries
-	if maxTries <= 0 {
-		maxTries = 3
-	}
-	if maxTries > len(accts) {
-		maxTries = len(accts)
-	}
-
-	var lastErr error
-	var used *doubao.Account
-	for i := 0; i < maxTries; i++ {
-		acct := s.Store.NextAccount()
-		if acct == nil {
-			break
-		}
-		used = acct
-		cctx, cancel := context.WithTimeout(ctx, timeout)
-		err := fn(cctx, acct)
-		cancel()
-
-		if err == nil {
-			s.Store.MarkAccountResult(acct.ID, true, "")
-			return acct, nil
-		}
-		lastErr = err
-		s.Store.MarkAccountResult(acct.ID, false, err.Error())
-		// 上下文被取消（客户端断开）时不再重试
-		if ctx.Err() != nil {
-			break
-		}
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("全部账号均不可用")
-	}
-	return used, lastErr
 }
 
 // withUploadedAttachments 确保每个图片 / 文件附件都有可用于 content_block 的上游 uri。
@@ -667,39 +562,4 @@ func estimateUsage(prompt, out string) map[string]any {
 		"completion_tokens": o,
 		"total_tokens":      p + o,
 	}
-}
-
-// record 记录一次请求结果。
-//
-// acct 是本次实际使用的账号（可为 nil）；stream 标记是否为流式响应。
-func (s *Server) record(key string, acct *doubao.Account, model string, stream bool, status int, start time.Time, inLen, outLen int, err error) {
-	e := store.LogEntry{
-		Time:      time.Now().Unix(),
-		Key:       mask(key),
-		Model:     model,
-		Stream:    stream,
-		Status:    status,
-		LatencyMS: time.Since(start).Milliseconds(),
-		PromptLen: inLen,
-		OutputLen: outLen,
-	}
-	if acct != nil {
-		e.Account = acct.ID
-	}
-	if err != nil {
-		e.Err = err.Error()
-	}
-	s.Store.Record(e, outLen)
-}
-
-func statusOf(err error) int {
-	if err == nil {
-		return http.StatusOK
-	}
-	return http.StatusBadGateway
-}
-
-// contextWithTimeout 在请求上下文上叠加超时。
-func contextWithTimeout(r *http.Request, d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(r.Context(), d)
 }
