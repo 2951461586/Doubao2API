@@ -77,6 +77,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/login/qrcode", s.withAdminAuth(s.handleLoginQRCode))
 	mux.HandleFunc("/admin/api/login/qrcode/poll", s.withAdminAuth(s.handleLoginQRCodePoll))
 
+	// 控制台图标：浏览器自动请求，无需鉴权。
+	mux.HandleFunc("/favicon.ico", serveFavicon)
+
 	mux.HandleFunc("/", s.handleRoot)
 
 	return s.withCORS(mux)

@@ -1,13 +1,30 @@
-# Doubao2API
+<div align="center">
+  <img src="assets/logo.png" width="112" height="112" alt="Doubao2API">
+  <h1>Doubao2API</h1>
+  <p><strong>把本机豆包（DoubaoWork）桌面端的上游模型服务，复刻成 OpenAI 兼容的 Go 网关</strong></p>
 
-把本机 **豆包工作（DoubaoWork）** 桌面端的上游模型服务，逆向复刻成一个
-**OpenAI 兼容的 Go 网关**。
+  <p>
+    <a href="https://github.com/2951461586/Doubao2API/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/2951461586/Doubao2API/actions/workflows/ci.yml/badge.svg?branch=master"></a>
+    <a href="https://github.com/2951461586/Doubao2API/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/2951461586/Doubao2API?sort=semver"></a>
+    <img alt="Go" src="https://img.shields.io/github/go-mod/go-version/2951461586/Doubao2API">
+    <img alt="Dependencies" src="https://img.shields.io/badge/dependencies-0-brightgreen">
+    <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  </p>
 
-复用桌面端已登录的会话凭据，无需另申请密钥；纯 Go 标准库实现，单文件约 10 MB，
-零外部依赖。
+  <p>
+    <img alt="API" src="https://img.shields.io/badge/API-OpenAI%20%2F%20Anthropic-412991">
+    <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey">
+  </p>
+</div>
 
-当前版本 **v0.1.0** · 预编译产物见 [Releases](https://github.com/2951461586/Doubao2API/releases/latest) ·
-变更见 [CHANGELOG](CHANGELOG.md) · Apache-2.0
+<p align="center">
+  复用桌面端已登录的会话凭据，无需另申请密钥；纯 Go 标准库实现，单文件约 10 MB，零第三方依赖。<br>
+  当前版本 <b>v0.1.0</b> ·
+  <a href="https://github.com/2951461586/Doubao2API/releases/latest">下载预编译产物</a> ·
+  <a href="CHANGELOG.md">更新日志</a> ·
+  <a href="docs/api.md">接口文档</a>
+</p>
+
 
 ```text
 ┌──────────────┐   /v1/chat/completions   ┌─────────────┐   Cookie + CSRF 头   ┌────────────────────────┐
@@ -226,3 +243,6 @@ docker run -d --name doubao2api --restart unless-stopped \
 
 > 许可与使用限制是两件事：Apache-2.0 授予你使用、修改、分发本代码的权利，
 > 但并不豁免你对上游服务条款的义务。请遵守 [docs/security.md](docs/security.md) 的注意事项。
+
+项目 Logo（`assets/logo.png` 与控制台 favicon）取自豆包客户端图标，仅用于标识本项目，
+**不在 Apache-2.0 授权范围内**，其权利归原权利人；如需再分发请自行评估。

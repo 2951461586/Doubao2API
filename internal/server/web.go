@@ -10,6 +10,11 @@ import (
 //go:embed web/index.html
 var consoleHTML []byte
 
+// faviconICO 是控制台图标（16/32/48 三种尺寸），取自豆包客户端图标。
+//
+//go:embed web/favicon.ico
+var faviconICO []byte
+
 // serveConsole 输出控制台单页。
 //
 // 响应头刻意收紧：禁止缓存、禁止 MIME 嗅探、不发送 Referer，
@@ -21,4 +26,21 @@ func serveConsole(w http.ResponseWriter, _ *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write(consoleHTML)
+}
+
+// serveFavicon 输出控制台图标。
+//
+// 图标是构建时内嵌的字节，可以放心长期缓存（公开、不含敏感信息）；
+// 只有浏览器会请求它，因此不参与鉴权。
+func serveFavicon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "image/x-icon")
+	h.Set("Cache-Control", "public, max-age=86400")
+	h.Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(faviconICO)
 }

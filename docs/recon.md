@@ -406,9 +406,11 @@ doubao2api/
 │       ├── videos.go              # /v1/videos/generations
 │       ├── music.go               # /v1/music/*
 │       ├── login.go               # 扫码登录（passport SSO）
-│       ├── web.go                 # 控制台单页的内嵌与响应头
+│       ├── web.go                 # 控制台单页与 favicon 的内嵌及响应头
 │       ├── extras.go              # 空壳：记录杂项端点的拆分去向
-│       └── web/index.html         # 控制台单页
+│       ├── web/index.html         # 控制台单页
+│       └── web/favicon.ico        # 控制台图标（16/32/48，内嵌）
+├── assets/logo.png                # 项目 Logo（README 使用，取自客户端图标）
 ├── cmd/probe/                     # 上游探测工具（逆向排障用，非网关功能）
 ├── tools/extract_pak.py           # biz.pak 解包脚本（第一步，可重跑）
 ├── tools/extract_sources.py       # source map → 源码还原脚本（第二步，可重跑）

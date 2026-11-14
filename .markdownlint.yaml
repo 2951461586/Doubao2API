@@ -1,0 +1,33 @@
+# markdownlint 配置
+#
+# README 采用「居中 Logo + 标题 + 徽章」的常见版式，因此：
+#   - MD033（内联 HTML）：白名单放行版式必需的元素，其余标签仍会告警；
+#   - MD041（首行须为顶级标题）：首行是 <div align="center">，刻意关闭；
+#   - MD013（行宽 80）：徽章是一行内联 HTML（必然超长），且中文按字符计宽会失真，
+#     行宽改为人工约定（正文尽量控制在 100 字符内）。
+# 其余规则保持默认（标题层级、表格列数、代码块语言等仍然校验）。
+MD033:
+  allowed_elements:
+    - div
+    - img
+    - p
+    - h1
+    - strong
+    - b
+    - em
+    - br
+    - a
+    - code
+    - kbd
+    - sub
+    - sup
+    - details
+    - summary
+    - table
+    - thead
+    - tbody
+    - tr
+    - th
+    - td
+MD041: false
+MD013: false
