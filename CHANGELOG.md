@@ -6,8 +6,34 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-14
+
+### Added
+
+- **`/health` 暴露 `non_json_events`**：`internal/doubao` 新增 `ParseStats`，SSE 解析遇到
+  无法解析的非 JSON `data:` 事件时计数（进程级累加）。此前这类事件被静默跳过，
+  上游协议漂移时表现为「回答空白」而毫无告警；现在可通过对 `/health` 的观测
+  发现计数异常增长。
+
+### Changed
+
+- **流式错误改为结构化帧**：`/v1/chat/completions` 在响应头提交后才遇到上游错误时，
+  不再把 `[错误] …` 当作正文 delta 下发。现在输出一帧
+  `{"error":{"type":"upstream_error","message":"…"},"choices":[{"delta":{},"finish_reason":"error"}]}`，
+  再以 `data: [DONE]` 收尾。此前 OpenAI SDK 会把错误文案当正常回复，并在
+  `finish_reason=stop` 时认为请求成功。
+- **请求级 `agent_mode` 生效**：普通模型可以用 `agent_mode` / `doubao.agent_mode`
+  显式开启工作模式；工作模式模型（registry 里带 `AgentMode` 的）自带值优先，
+  不会被请求覆盖。此前该字段被合并进 `extras` 后从未使用，属于误导性死字段。
+
 ### Fixed
 
+- **生成产物空 ID 被吞**：`newCreationURLs` 之前用 `seen[cr.ID]` 去重，creation 不带
+  `id` 时首个产物就把 `seen[""]` 占位，后续不同 URL 的产物全被丢弃。现在 ID 为空时
+  退化为按 URL 去重（同 URL 重复推送仍只下一次）。
+- **未声明块类型无法兜底透传**：`handleUnknownBlock` 用 `blockKeyFor(bt)` 取
+  `summary/title`，而真正未声明的类型该函数返回空串，导致兜底逻辑取不到值、
+  注释承诺的「未知类型透传」实际不生效。现在键名为空时读取 content 顶层字段。
 - **控制台图标尺寸过小**：`favicon.ico` 之前只有 16/32/48 三帧，高分屏标签页与
   任务栏会拿 48px 拉伸，显得模糊偏小。改为 16/24/32/48/64/128/256 **七档原生帧**
   并量化到 256 色调色板（133 KB → **32 KB**，与同类项目同一量级）；
@@ -30,6 +56,11 @@
   同时把流式路径的上游错误改为 `*doubao.Error`，让分类不只依赖字符串匹配。
   验证：业务错误下 `ready` 保持 3、账号 `failures=0`、`tasks` 只产生 1 条日志；
   坏会话账号返回 `login invalid` 时该账号 `failures=1`、`ready` 降为 2。
+- 新增测试：`internal/doubao/{sse,stream_blocks,blocks}_test.go` 与
+  `internal/server/{chat,collector}_test.go`（54 个用例），覆盖 SSE 分帧边界、块分派/
+  去重、思维链边界、非 JSON 计数，并用假上游（`rewriteTransport` 劫持到 `httptest`）
+  跑通 `/v1/chat/*` 全链路：阻塞聚合、流式帧序、换号重试、附件失败、结构化错误帧。
+  覆盖率：`doubao` 25.5% → 30.2%，`server` 34.5% → 47.3%，总计 36.5% → 42.8%。
 
 ## [0.1.2] - 2026-11-14
 

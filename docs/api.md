@@ -84,12 +84,17 @@
 > 或直接传数值（0 / 2 / 3 / 4 / 5 / 6 / 8 / 9 / 13 / 15 / 17 / 18 …），对应上游 `option.action_bar_skill_id`；
 > `input_skill` 对应上游 `ext.input_skill`（音乐技能入参）；
 > `reasoning_effort` 映射思考档位；`agent_mode` / `model_item_key` / `mode_id` / `selection_mode`
-> 透传新版客户端的模型选择参数；`selected_skills` 对应 `ext.mention_skill_list`；
+> 透传新版客户端的模型选择参数（`agent_mode` 对普通模型生效；工作模式模型自带的固定值优先）；
+> `selected_skills` 对应 `ext.mention_skill_list`；
 > `ext` 可整体透传上游 `ext`（高级用法）；也可写成 `{"doubao":{...}}` 命名空间形式。
 > `content` 里可放 `input_file` / `image_url` 分片（见下文「多模态」）。
 >
 > 响应侧除 `content` / `reasoning_content` 外，还会在顶层（非流式）或 `delta`（流式）返回
 > `images` / `sources` / `artifacts` / `music` 等结构化产物。
+>
+> 流式请求在响应头已提交后才遇到上游错误时，会下发一帧结构化错误：
+> `{"error":{"type":"upstream_error","message":"…"},"choices":[{"delta":{},"finish_reason":"error"}]}`，
+> 随后以 `data: [DONE]` 收尾；不会再以 `finish_reason=stop` 伪装成功。
 
 #### 多轮会话
 
@@ -166,7 +171,7 @@ curl http://127.0.0.1:10086/v1/messages \
 
 | 端点 | 方法 | 说明 |
 | --- | --- | --- |
-| `/health` `/healthz` | GET | 账号 / 模型就绪计数（免鉴权） |
+| `/health` `/healthz` | GET | 账号 / 模型就绪计数 + `non_json_events`（被跳过的非 JSON SSE 事件数，持续增长说明上游协议漂移；免鉴权） |
 | `/ping` | GET | 纯文本 `pong`（免鉴权，供容器探针） |
 
 ### 4.3 控制台接口
