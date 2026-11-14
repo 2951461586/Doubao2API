@@ -47,10 +47,7 @@ func (s *Server) handleMusicAudio(w http.ResponseWriter, r *http.Request) {
 	settings := s.Store.Settings()
 	model := registry.Resolve("", settings.ModelAliases)
 	key := extractKey(r)
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	var url string
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {

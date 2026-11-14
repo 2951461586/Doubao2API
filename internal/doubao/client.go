@@ -90,7 +90,7 @@ func SecurityParams(a *Account) url.Values {
 	set("samantha_web", "1")
 	set("use-olympus-account", "1")
 	set("fp", a.FPValue())
-	set("web_tab_id", a.webTabID())
+	set("web_tab_id", a.TabID())
 	if a.MsToken != "" {
 		v.Set("msToken", a.MsToken)
 	}

@@ -312,18 +312,8 @@ func accountFromCookies(rows []cookieRow) *Account {
 	if ms := findCookie(rows, "msToken"); ms != "" {
 		acct.MsToken = ms
 	}
-	if acct.DeviceID == "" {
-		acct.DeviceID = RandomDigits(15)
-	}
-	if acct.WebID == "" {
-		acct.WebID = RandomDigits(19)
-	}
-	if acct.FP == "" || !strings.HasPrefix(acct.FP, "verify_") {
-		acct.FP = "verify_" + acct.DeviceID
-	}
-	if acct.WebTabID == "" {
-		acct.WebTabID = NewUUID()
-	}
+	// 设备指纹 / tab id 的补齐规则与手工录入共用一套（account.Normalize）。
+	acct.Normalize()
 	return acct
 }
 

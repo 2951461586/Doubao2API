@@ -481,19 +481,17 @@ func (s *Server) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		_ = s.Store.Save()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
 	case "toggle":
-		if a := s.Store.Account(body.ID); a != nil {
-			a.Enabled = !a.Enabled
+		enabled, ok := s.Store.ToggleAccount(body.ID)
+		if ok {
 			_ = s.Store.Save()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": ok, "enabled": enabled})
 	case "clear-errors":
-		if a := s.Store.Account(body.ID); a != nil {
-			a.Failures = 0
-			a.Status = "ok"
-			a.LastErr = ""
+		ok := s.Store.ClearAccountErrors(body.ID)
+		if ok {
 			_ = s.Store.Save()
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": ok})
 	default:
 		writeErr(w, http.StatusBadRequest, "未知操作: "+body.Action, "invalid_request_error")
 	}

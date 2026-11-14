@@ -58,10 +58,7 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 	settings := s.Store.Settings()
 	model := registry.Resolve(req.Model, settings.ModelAliases)
 	key := extractKey(r)
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	upReq := doubao.ChatRequest{
 		Text:       imageSkillPrompt(prompt, req.Style, req.Size),

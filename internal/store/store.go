@@ -10,7 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"doubao2api/internal/doubao"
+	"doubao2api/internal/account"
+	"doubao2api/internal/ids"
 )
 
 // APIKey 是网关对外签发的调用密钥。
@@ -69,14 +70,21 @@ type Stats struct {
 
 // State 是全部持久化状态。
 type State struct {
-	Accounts []*doubao.Account `json:"accounts"`
-	Keys     []*APIKey         `json:"keys"`
-	Settings Settings          `json:"settings"`
-	Stats    Stats             `json:"stats"`
-	Logs     []LogEntry        `json:"logs"`
+	Accounts []*account.Account `json:"accounts"`
+	Keys     []*APIKey          `json:"keys"`
+	Settings Settings           `json:"settings"`
+	Stats    Stats              `json:"stats"`
+	Logs     []LogEntry         `json:"logs"`
 }
 
 // Store 是带锁的状态容器。
+//
+// 并发约定（重要）：
+//   - 所有导出方法都在锁内读写 s.st，绝不让内部指针逃逸；
+//   - 读取接口（Accounts / Account / NextAccount）一律返回深拷贝，
+//     调用方可以随意修改返回值，不会影响其它请求，也不会写入状态文件；
+//   - 修改账号必须走 Mark* / Toggle / Clear 之类的方法，
+//     它们在同一把写锁内完成修改，因此 Save 期间不会出现半更新状态。
 type Store struct {
 	mu     sync.RWMutex
 	saveMu sync.Mutex
@@ -134,21 +142,13 @@ func Open(path string) (*Store, error) {
 		if s.st.Stats.StartedAt == 0 {
 			s.st.Stats.StartedAt = time.Now().Unix()
 		}
-		// 迁移旧版本导入的指纹：客户端 1.2 起 fp 固定为 verify_<device_id>，
-		// 且 web_tab_id 每个账号固定一个。
+		// 迁移旧版本导入的状态：fp 固定为 verify_<device_id>、补齐 web_tab_id 等。
+		// 规则集中在 account.Normalize，避免与桌面端导入 / 手工录入出现两套逻辑。
 		for _, a := range s.st.Accounts {
 			if a == nil {
 				continue
 			}
-			if a.DeviceID != "" && a.FP != "verify_"+a.DeviceID {
-				a.FP = "verify_" + a.DeviceID
-			}
-			if a.WebTabID == "" {
-				a.WebTabID = doubao.NewUUID()
-			}
-			if a.PCVersion == "" && a.AppVersion != "" {
-				a.PCVersion = a.AppVersion
-			}
+			a.Normalize()
 		}
 	case errors.Is(err, os.ErrNotExist):
 		s.st.Stats.StartedAt = time.Now().Unix()
@@ -162,6 +162,9 @@ func Open(path string) (*Store, error) {
 func (s *Store) Path() string { return s.path }
 
 // Save 原子写回状态文件。
+//
+// 持读锁 marshal 是安全的：所有持久化字段的写操作都在写锁内完成，
+// 读取接口返回的是深拷贝，因此这里不会与修改撞车（见 Store 的并发约定）。
 func (s *Store) Save() error {
 	// 串行化落盘，避免自动任务与 HTTP 请求同时写同一个 .tmp 文件。
 	s.saveMu.Lock()
@@ -184,19 +187,26 @@ func (s *Store) Save() error {
 
 // --- 账号 ---
 
-// Accounts 返回账号快照。
-func (s *Store) Accounts() []*doubao.Account {
+// Accounts 返回账号快照（深拷贝，调用方可以随意修改）。
+func (s *Store) Accounts() []*account.Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]*doubao.Account, len(s.st.Accounts))
-	copy(out, s.st.Accounts)
+	out := make([]*account.Account, 0, len(s.st.Accounts))
+	for _, a := range s.st.Accounts {
+		out = append(out, a.Clone())
+	}
 	return out
 }
 
-// Account 按 ID 查找账号。
-func (s *Store) Account(id string) *doubao.Account {
+// Account 按 ID 查找账号（深拷贝；不存在返回 nil）。
+func (s *Store) Account(id string) *account.Account {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.accountLocked(id).Clone()
+}
+
+// accountLocked 返回内部账号指针；调用方必须已持锁且不得泄漏该指针。
+func (s *Store) accountLocked(id string) *account.Account {
 	for _, a := range s.st.Accounts {
 		if a.ID == id {
 			return a
@@ -205,18 +215,25 @@ func (s *Store) Account(id string) *doubao.Account {
 	return nil
 }
 
-// UpsertAccount 按会话 ID 去重后写入账号。
-func (s *Store) UpsertAccount(a *doubao.Account) bool {
+// UpsertAccount 按会话 ID 去重后写入账号；返回是否为新增。
+//
+// 入参会被拷贝一份存储，调用方后续修改自己那份不会影响状态。
+func (s *Store) UpsertAccount(a *account.Account) bool {
+	if a == nil {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cp := a.Clone()
 	for i, ex := range s.st.Accounts {
-		if ex.SessionID() != "" && ex.SessionID() == a.SessionID() {
-			a.ID = ex.ID
-			s.st.Accounts[i] = a
+		if ex.SessionID() != "" && ex.SessionID() == cp.SessionID() {
+			cp.ID = ex.ID
+			// 保留调用方传入的运行期缓存（CSRF 等），其余字段整体替换。
+			s.st.Accounts[i] = cp
 			return false
 		}
 	}
-	s.st.Accounts = append(s.st.Accounts, a)
+	s.st.Accounts = append(s.st.Accounts, cp)
 	return true
 }
 
@@ -237,14 +254,14 @@ func (s *Store) RemoveAccount(id string) bool {
 //
 // 连续失败过多的账号会被跳过；全部不可用时回退到失败最少的那个，
 // 保证不会硬阻塞请求。
-func (s *Store) NextAccount() *doubao.Account {
+func (s *Store) NextAccount() *account.Account {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.st.Accounts)
 	if n == 0 {
 		return nil
 	}
-	var best *doubao.Account
+	var best *account.Account
 	for i := 0; i < n; i++ {
 		idx := (s.rotate + i) % n
 		a := s.st.Accounts[idx]
@@ -256,11 +273,11 @@ func (s *Store) NextAccount() *doubao.Account {
 		}
 		if a.Failures == 0 {
 			s.rotate = (idx + 1) % n
-			return a
+			return a.Clone()
 		}
 	}
 	s.rotate = (s.rotate + 1) % n
-	return best
+	return best.Clone()
 }
 
 // MarkAccountResult 记录一次账号调用结果。
@@ -286,6 +303,44 @@ func (s *Store) MarkAccountResult(id string, ok bool, note string) {
 		}
 		return
 	}
+}
+
+// ToggleAccount 切换账号启用状态；返回切换后的值。
+func (s *Store) ToggleAccount(id string) (enabled bool, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false, false
+	}
+	a.Enabled = !a.Enabled
+	return a.Enabled, true
+}
+
+// SetAccountEnabled 设置账号启用状态。
+func (s *Store) SetAccountEnabled(id string, enabled bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false
+	}
+	a.Enabled = enabled
+	return true
+}
+
+// ClearAccountErrors 清空账号的失败计数与错误状态。
+func (s *Store) ClearAccountErrors(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false
+	}
+	a.Failures = 0
+	a.Status = "ok"
+	a.LastErr = ""
+	return true
 }
 
 // MarkCheckin 记录一次签到结果。
@@ -342,7 +397,7 @@ func (s *Store) AddKey(name string) *APIKey {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := &APIKey{
-		Key:       "sk-" + doubao.RandomHex(24),
+		Key:       "sk-" + ids.Hex(24),
 		Name:      name,
 		Enabled:   true,
 		CreatedAt: time.Now().Unix(),

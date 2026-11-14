@@ -4,7 +4,7 @@
 // 鉴权依赖桌面端已登录的 Chromium Cookie。
 package doubao
 
-import "sync"
+import "doubao2api/internal/account"
 
 // 内容块类型（content_block[].block_type），对齐桌面端 1.2 版 bundle 的完整枚举。
 const (
@@ -84,146 +84,34 @@ const DefaultBotID = "7338286299411103781"
 
 // 客户端标识与版本，对齐 DoubaoWork 147.0.7727.149 / 前端包 3.45.5 / 应用 2.36.15。
 const (
-	// AppID 是 DoubaoWork（桌面端）的中台 appId。主端 Web 为 582478。
-	AppID = "1044603"
 	// AppIDMain 是豆包主端 Web 的 appId（兼容旧账号 / 手工 Cookie）。
 	AppIDMain = "582478"
 	// VersionCode 与桌面端 VERSION_CODE 对齐
 	VersionCode = "20800"
 	// ClientPlatform 上游识别的客户端平台
 	ClientPlatform = "pc_client"
-	// PCVersion 是桌面端应用版本（UA 中 SamanthaDoubaoWork/<version>）
-	PCVersion = "2.36.15"
-	// RuntimeVersion 是前端 samantha 包版本（桌面端硬编码 3.45.5）
-	RuntimeVersion = "3.45.5"
-	// ChromiumVersion 与桌面端内嵌 Chromium 对齐
-	ChromiumVersion = "147.0.7727.149"
 	// DevicePlatform 是桌面端真实形态；对外 device_platform 仍兼容为 web。
 	DevicePlatform = "desktop"
 	// WebPlatform 对应公参 web_platform
 	WebPlatform = "desktop"
-	// BuildChannel 对应品牌信息 buildChannel（Windows 构建）
-	BuildChannel = "win"
 )
 
-// UserAgent 与桌面端一致（Chromium UA + 应用标识，客户端用 getSamanthaClientVersion 解析后者）。
-const UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" +
-	ChromiumVersion + " Safari/537.36 SamanthaDoubaoWork/" + PCVersion
+// 账号身份 / 客户端版本常量定义在 internal/account（持久化层需要它们），
+// 这里重新导出，保持协议代码与测试沿用 doubao.<Name> 的写法。
+const (
+	AppID           = account.AppID
+	PCVersion       = account.PCVersion
+	RuntimeVersion  = account.RuntimeVersion
+	ChromiumVersion = account.ChromiumVersion
+	BuildChannel    = account.BuildChannel
+	UserAgent       = account.UserAgent
+)
 
-// Account 一个豆包账号（= 一份已登录的会话 Cookie + 设备指纹）。
-type Account struct {
-	ID       string            `json:"id"`
-	Name     string            `json:"name"`
-	Source   string            `json:"source"` // auto-import / manual / qr
-	Cookies  map[string]string `json:"cookies"`
-	DeviceID string            `json:"device_id"`
-	WebID    string            `json:"web_id"`
-	IID      string            `json:"iid,omitempty"`
-	FP       string            `json:"fp"`
-	MsToken  string            `json:"ms_token"`
-	// AppID 允许按账号覆盖中台 appId（work=1044603 / 主端=582478）。
-	AppID string `json:"app_id,omitempty"`
-	// 客户端版本信息（导入时从 Local Storage / brand info 读取，缺省用常量）。
-	AppVersion     string `json:"app_version,omitempty"`
-	PCVersion      string `json:"pc_version,omitempty"`
-	RuntimeVersion string `json:"runtime_version,omitempty"`
-	Channel        string `json:"channel,omitempty"`
-	// WebTabID 是每个账号固定的 web_tab_id（客户端每个 tab 固定一个）。
-	WebTabID string `json:"web_tab_id,omitempty"`
-
-	// CSRFTokenValue 是刷新后的 token，CSRFTokenAt 是其获取时间（Unix 秒）。
-	CSRFTokenValue string     `json:"csrf_token,omitempty"`
-	CSRFTokenAt    int64      `json:"csrf_token_at,omitempty"`
-	csrfMu         sync.Mutex `json:"-"`
-
-	// 每日签到状态（日期为本地时区 YYYY-MM-DD）。
-	LastCheckinDate   string `json:"last_checkin_date,omitempty"`
-	LastCheckinAt     int64  `json:"last_checkin_at,omitempty"`
-	LastCheckinReward int64  `json:"last_checkin_reward,omitempty"`
-
-	// 自动任务每日计数（LastTaskDate 为本地日期 YYYY-MM-DD）。
-	LastTaskDate  string `json:"last_task_date,omitempty"`
-	LastTaskCount int    `json:"last_task_count,omitempty"`
-
-	Enabled  bool   `json:"enabled"`
-	Status   string `json:"status"` // ok / error
-	Note     string `json:"note"`
-	LastUsed int64  `json:"last_used"`
-	LastErr  string `json:"last_err"`
-	Failures int    `json:"failures"`
-}
-
-// CSRFToken 返回上游要求的 x-tt-passport-csrf-token。
+// Account 是账号模型的重导出（定义在 internal/account）。
 //
-// 优先使用 /passport/safe/csrf_token/ 刷新得到的缓存值，其次回退到 Cookie。
-func (a *Account) CSRFToken() string {
-	if v := a.cachedCSRF(); v != "" {
-		return v
-	}
-	if v := a.Cookies["passport_csrf_token"]; v != "" {
-		return v
-	}
-	return a.Cookies["passport_csrf_token_default"]
-}
-
-// AppIDValue 返回账号使用的中台 appId。
-func (a *Account) AppIDValue() string {
-	if a.AppID != "" {
-		return a.AppID
-	}
-	return AppID
-}
-
-// PCVersionValue 返回 pc_version（UA 中的应用版本）。
-func (a *Account) PCVersionValue() string {
-	if a.PCVersion != "" {
-		return a.PCVersion
-	}
-	if a.AppVersion != "" {
-		return a.AppVersion
-	}
-	return PCVersion
-}
-
-// RuntimeVersionValue 返回 runtime_version（前端包版本）。
-func (a *Account) RuntimeVersionValue() string {
-	if a.RuntimeVersion != "" {
-		return a.RuntimeVersion
-	}
-	return RuntimeVersion
-}
-
-// ChannelValue 返回 channel 公参。
-func (a *Account) ChannelValue() string {
-	if a.Channel != "" {
-		return a.Channel
-	}
-	return BuildChannel
-}
-
-// FPValue 返回指纹参数：客户端固定用 verify_<device_id>。
-func (a *Account) FPValue() string {
-	if a.DeviceID != "" {
-		return "verify_" + a.DeviceID
-	}
-	if a.FP != "" {
-		return a.FP
-	}
-	return defaultFP()
-}
-
-// UAValue 返回带应用标识的 User-Agent。
-func (a *Account) UAValue() string {
-	v := a.PCVersionValue()
-	if v == PCVersion {
-		return UserAgent
-	}
-	return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" +
-		ChromiumVersion + " Safari/537.36 SamanthaDoubaoWork/" + v
-}
-
-// SessionID 返回用于展示/排障的会话标识。
-func (a *Account) SessionID() string { return a.Cookies["sessionid"] }
+// 上层代码继续用 doubao.Account 即可；持久化层（internal/store）直接依赖
+// internal/account，从而不必依赖本包。
+type Account = account.Account
 
 // CompletionChunk 是从上游 SSE 解析出的一个增量。
 type CompletionChunk struct {

@@ -26,11 +26,7 @@ func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	key := extractKey(r)
-	settings := s.Store.Settings()
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	var list *doubao.SkillList
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
@@ -184,11 +180,7 @@ func (s *Server) handleConversations(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	key := extractKey(r)
-	settings := s.Store.Settings()
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		return s.Up.ConversationAction(ctx, acct, action, id, name)
 	})
@@ -226,11 +218,7 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	key := extractKey(r)
-	settings := s.Store.Settings()
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 	var page *doubao.ConversationPage
 	acct, err := s.withAccount(r.Context(), q.Get("account_id"), timeout, func(ctx context.Context, acct *doubao.Account) error {
 		p, err := s.Up.Conversations(ctx, acct, offset, limit, types)
@@ -288,11 +276,7 @@ func (s *Server) handleMusicLyrics(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	key := extractKey(r)
-	settings := s.Store.Settings()
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	var lines []string
 	acct, err := s.withAccountRetry(r.Context(), timeout, func(ctx context.Context, acct *doubao.Account) error {

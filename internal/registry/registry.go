@@ -2,10 +2,17 @@
 package registry
 
 import (
+	"slices"
 	"strings"
 
 	"doubao2api/internal/doubao"
 )
+
+// DefaultID 是无法识别时回落的内置模型（快速模式）。
+const DefaultID = "doubao"
+
+// maxAliasDepth 限制自定义别名链的长度，防止环或超长链拖慢解析。
+const maxAliasDepth = 8
 
 // Model 是一个对外可用的模型。
 type Model struct {
@@ -76,32 +83,145 @@ var aliases = map[string]string{
 
 // Resolve 把用户传入的模型名解析为内置模型。
 //
-// 依次尝试：精确 ID → 自定义别名 → 内置别名 → 前缀/包含匹配。
+// 依次尝试：精确 ID → 自定义别名（可链式）→ 内置别名 → 最长前缀/包含匹配。
 // 无法识别时回落到 doubao（快速模式）。
 func Resolve(name string, custom map[string]string) Model {
-	n := strings.TrimSpace(strings.ToLower(name))
+	n := normalize(name)
 	if n == "" {
-		return byID("doubao")
+		return byID(DefaultID)
 	}
 	if m, ok := lookup(n); ok {
 		return m
 	}
-	if target, ok := custom[n]; ok {
-		if m, ok := lookup(strings.ToLower(target)); ok {
-			return m
-		}
+	cm := normalizeCustom(custom)
+	if m, ok := resolveCustom(n, cm); ok {
+		return m
 	}
 	if target, ok := aliases[n]; ok {
 		return byID(target)
 	}
-	// 宽松匹配：任意包含 doubao 的名称
+	if m, ok := matchLongest(n, cm); ok {
+		return m
+	}
+	return byID(DefaultID)
+}
+
+// normalizeCustom 把自定义别名表归一化（键小写去空格、丢弃空项）。
+//
+// 用户在控制台里可能把别名写成大驼峰，解析时必须与请求里的模型名
+// 走同一套归一化规则。
+func normalizeCustom(custom map[string]string) map[string]string {
+	if len(custom) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(custom))
+	for k, v := range custom {
+		key := normalize(k)
+		if key == "" {
+			continue
+		}
+		out[key] = v
+	}
+	return out
+}
+
+// resolveCustom 解析自定义别名，支持别名指向另一个别名。
+//
+// 带环路保护（seen）与深度上限，避免用户配置出 a→b→a 时死循环。
+func resolveCustom(n string, custom map[string]string) (Model, bool) {
+	seen := map[string]bool{n: true}
+	cur := n
+	for i := 0; i < maxAliasDepth; i++ {
+		target, ok := custom[cur]
+		if !ok {
+			return Model{}, false
+		}
+		target = normalize(target)
+		if m, ok := lookup(target); ok {
+			return m, true
+		}
+		if seen[target] {
+			return Model{}, false
+		}
+		seen[target] = true
+		cur = target
+	}
+	return Model{}, false
+}
+
+// matchLongest 做宽松匹配：在所有已知名字里取「最长」的包含匹配。
+//
+// 取最长而不是按清单顺序首个命中：否则 "doubao-think-pro" 会被 "doubao"
+// 抢先命中，结果是快速模式（历史 bug）。
+func matchLongest(n string, custom map[string]string) (Model, bool) {
+	type candidate struct {
+		key string
+		m   Model
+	}
+	cands := make([]candidate, 0, len(Builtin)+len(aliases)+len(custom))
 	for _, m := range Builtin {
-		if strings.Contains(n, m.ID) {
-			return m
+		cands = append(cands, candidate{m.ID, m})
+	}
+	for alias, target := range aliases {
+		if m, ok := lookup(target); ok {
+			cands = append(cands, candidate{alias, m})
 		}
 	}
-	return byID("doubao")
+	names := make([]string, 0, len(custom))
+	for alias := range custom {
+		names = append(names, alias)
+	}
+	slices.Sort(names)
+	for _, alias := range names {
+		if m, ok := resolveCustom(alias, custom); ok {
+			m.ID = alias
+			m.Name = alias + " → " + m.Name
+			cands = append(cands, candidate{alias, m})
+		}
+	}
+	// 最长优先；等长时按名字字典序，保证结果稳定。
+	slices.SortFunc(cands, func(a, b candidate) int {
+		if len(a.key) != len(b.key) {
+			return len(b.key) - len(a.key)
+		}
+		return strings.Compare(a.key, b.key)
+	})
+	for _, c := range cands {
+		if strings.Contains(n, c.key) {
+			return c.m, true
+		}
+	}
+	return Model{}, false
 }
+
+// List 返回对外模型清单（含自定义别名）。
+//
+// 自定义别名按名字排序后追加，保证 /v1/models 的输出顺序稳定
+// （map 遍历顺序随机，曾导致响应顺序抖动）。
+func List(custom map[string]string) []Model {
+	out := slices.Clone(Builtin)
+	cm := normalizeCustom(custom)
+	names := make([]string, 0, len(cm))
+	for alias := range cm {
+		names = append(names, alias)
+	}
+	slices.Sort(names)
+	for _, alias := range names {
+		if _, ok := lookup(alias); ok {
+			continue // 与内置 ID 同名，避免清单里出现重复 ID
+		}
+		m, ok := resolveCustom(alias, cm)
+		if !ok {
+			continue
+		}
+		m.ID = alias
+		m.Name = alias + " → " + m.Name
+		out = append(out, m)
+	}
+	return out
+}
+
+func normalize(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
 
 func lookup(n string) (Model, bool) {
 	for _, m := range Builtin {
@@ -115,18 +235,4 @@ func lookup(n string) (Model, bool) {
 func byID(id string) Model {
 	m, _ := lookup(id)
 	return m
-}
-
-// List 返回对外模型清单（含自定义别名）。
-func List(custom map[string]string) []Model {
-	out := make([]Model, len(Builtin))
-	copy(out, Builtin)
-	for alias, target := range custom {
-		if m, ok := lookup(strings.ToLower(target)); ok {
-			m.ID = alias
-			m.Name = alias + " → " + m.Name
-			out = append(out, m)
-		}
-	}
-	return out
 }

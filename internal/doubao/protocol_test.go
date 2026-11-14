@@ -7,15 +7,16 @@ import (
 )
 
 func testAccount() *Account {
-	return &Account{
-		DeviceID:       "2064247378718569",
-		WebID:          "7600000000000000000",
-		IID:            "3876257098650236",
-		CSRFTokenValue: "csrf-from-refresh",
+	a := &Account{
+		DeviceID: "2064247378718569",
+		WebID:    "7600000000000000000",
+		IID:      "3876257098650236",
 		Cookies: map[string]string{
 			"sessionid": "sid",
 		},
 	}
+	a.SetCSRF("csrf-from-refresh") // 仅驻留内存，不落盘
+	return a
 }
 
 func TestSecurityParamsMatchDesktop(t *testing.T) {

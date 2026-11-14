@@ -55,11 +55,8 @@ func (s *Server) handleVideoGenerations(w http.ResponseWriter, r *http.Request) 
 	model := registry.Resolve(req.Model, settings.ModelAliases)
 	key := extractKey(r)
 
-	// 视频生成远慢于对话，单独给足超时
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout < videoGenTimeout {
-		timeout = videoGenTimeout
-	}
+	// 视频生成远慢于对话，在通用超时之上再兜一个下限
+	timeout := max(s.requestTimeout(), videoGenTimeout)
 
 	upReq := doubao.VideoRequest{
 		Prompt:   prompt,

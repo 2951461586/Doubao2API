@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"doubao2api/internal/doubao"
+	"doubao2api/internal/account"
 )
 
 func newStore(t *testing.T) *Store {
@@ -23,8 +23,8 @@ func newStore(t *testing.T) *Store {
 	return s
 }
 
-func testAccount(id, session string) *doubao.Account {
-	return &doubao.Account{
+func testAccount(id, session string) *account.Account {
+	return &account.Account{
 		ID:      id,
 		Name:    "acct-" + id,
 		Enabled: true,
@@ -269,7 +269,7 @@ func TestNextAccountRotation(t *testing.T) {
 	a2 := testAccount("a2", "s2")
 	a2.Enabled = false // 停用，必须跳过
 	a3 := testAccount("a3", "s3")
-	for _, a := range []*doubao.Account{a1, a2, a3} {
+	for _, a := range []*account.Account{a1, a2, a3} {
 		s.UpsertAccount(a)
 	}
 
@@ -297,9 +297,18 @@ func TestNextAccountRotation(t *testing.T) {
 	}
 
 	// 全部停用时返回 nil。
+	// 注意：Accounts() 返回的是深拷贝，必须经 store 方法修改（这本身也是一条回归断言）。
 	s.UpdateSettings(func(*Settings) {})
 	for _, a := range s.Accounts() {
-		a.Enabled = false
+		a.Enabled = false // 只改副本
+	}
+	if got := s.NextAccount(); got == nil {
+		t.Error("修改快照不应影响内部状态")
+	}
+	for _, a := range s.Accounts() {
+		if !s.SetAccountEnabled(a.ID, false) {
+			t.Fatalf("SetAccountEnabled(%q) 失败", a.ID)
+		}
 	}
 	if got := s.NextAccount(); got != nil {
 		t.Errorf("全部停用时 NextAccount() = %v, want nil", got)
@@ -549,5 +558,188 @@ func TestUpdateSettingsConcurrent(t *testing.T) {
 	wg.Wait()
 	if got := s.Settings().MaxRetries; got < 1 || got > 5 {
 		t.Errorf("并发更新后 MaxRetries = %d, want 1..5", got)
+	}
+}
+
+// --- 并发约定回归（配合 go test -race） ---
+
+// TestAccountSnapshotsAreIsolated 锁死「读取接口返回深拷贝」这一约定。
+//
+// 历史问题：Accounts/Account/NextAccount 曾直接返回内部指针，
+// handler 在锁外改 a.Enabled 会与轮询、落盘并发读写同一块内存。
+func TestAccountSnapshotsAreIsolated(t *testing.T) {
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+
+	snap := s.Account("a1")
+	snap.Enabled = false
+	snap.Cookies["sessionid"] = "tampered"
+	snap.Failures = 99
+
+	got := s.Account("a1")
+	if !got.Enabled || got.Failures != 0 || got.Cookies["sessionid"] != "s1" {
+		t.Fatalf("修改快照污染了内部状态: %+v", got)
+	}
+	if got := s.NextAccount(); got == nil || !got.Enabled {
+		t.Fatal("NextAccount 也应返回可安全修改的副本")
+	}
+
+	// 入参同样被拷贝：调用方持有原对象不能影响状态。
+	in := testAccount("a2", "s2")
+	s.UpsertAccount(in)
+	in.Enabled = false
+	if a := s.Account("a2"); !a.Enabled {
+		t.Error("UpsertAccount 应保存入参的副本")
+	}
+}
+
+// TestAccountMutationsPersist 验证写操作经过 store 方法后确实落到状态里。
+func TestAccountMutationsPersist(t *testing.T) {
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+
+	if enabled, ok := s.ToggleAccount("a1"); !ok || enabled {
+		t.Fatalf("ToggleAccount() = (%v, %v), want (false, true)", enabled, ok)
+	}
+	if a := s.Account("a1"); a.Enabled {
+		t.Error("停用应已生效")
+	}
+	s.MarkAccountResult("a1", false, "boom")
+	if !s.ClearAccountErrors("a1") {
+		t.Fatal("ClearAccountErrors() = false")
+	}
+	a := s.Account("a1")
+	if a.Failures != 0 || a.Status != "ok" || a.LastErr != "" {
+		t.Errorf("清理后仍有错误状态: %+v", a)
+	}
+
+	// 不存在的账号不应 panic，返回 false。
+	if _, ok := s.ToggleAccount("nope"); ok {
+		t.Error("未知账号 ToggleAccount 应返回 false")
+	}
+	if s.ClearAccountErrors("nope") || s.SetAccountEnabled("nope", true) {
+		t.Error("未知账号的写操作应返回 false")
+	}
+}
+
+// TestCSRFNotPersisted 断言运行时状态（CSRF token）不落盘。
+//
+// 历史问题：Account 里带 csrf_token 字段，既延长了敏感值在磁盘上的生命周期，
+// 又让 json.Marshal 与 setCSRF 并发读写同一字段。
+func TestCSRFNotPersisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := testAccount("a1", "s1")
+	s.UpsertAccount(a)
+	a.SetCSRF("csrf-secret-value")
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "csrf-secret-value") || strings.Contains(string(raw), "csrf_token") {
+		t.Fatalf("CSRF token 不应写入状态文件:\n%s", raw)
+	}
+
+	// 落盘后重新加载，账号仍可正常使用（token 会按需重新刷新）。
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s2.Account("a1"); got == nil || got.SessionID() != "s1" {
+		t.Fatalf("重新加载后账号丢失: %+v", got)
+	}
+}
+
+// TestConcurrentReadWriteSave 并发跑「读快照 / 写状态 / 落盘 / 记日志」四条路径。
+//
+// 这是历史数据竞争的最小复现：不加 -race 也能跑通，加 -race 才暴露问题。
+func TestConcurrentReadWriteSave(t *testing.T) {
+	s := newStore(t)
+	for i := 0; i < 4; i++ {
+		s.UpsertAccount(testAccount("a"+string(rune('1'+i)), "s"+string(rune('1'+i))))
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// 1) 落盘（模拟定时 / 每次修改后的 Save）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = s.Save()
+			}
+		}
+	}()
+
+	// 2) 账号池轮询 + 标记结果
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if a := s.NextAccount(); a != nil {
+					s.MarkAccountResult(a.ID, true, "")
+				}
+			}
+		}
+	}()
+
+	// 3) 控制台式读改（Toggle / Clear）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if _, ok := s.ToggleAccount("a1"); ok {
+					s.ClearAccountErrors("a1")
+				}
+				for _, a := range s.Accounts() {
+					a.Enabled = !a.Enabled // 改副本必须无副作用
+				}
+			}
+		}
+	}()
+
+	// 4) 设置 / 日志 / 统计
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				s.UpdateSettings(func(st *Settings) { st.MaxRetries = 1 + i%3 })
+				s.Record(LogEntry{Model: "doubao", Status: 200}, 1)
+				_ = s.Settings()
+				_ = s.Stats()
+				_ = s.Logs(0)
+			}
+		}
+	}()
+
+	time.Sleep(60 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	if err := s.Save(); err != nil {
+		t.Fatalf("最终落盘失败: %v", err)
 	}
 }

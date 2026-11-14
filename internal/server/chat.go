@@ -149,10 +149,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	key := extractKey(r)
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	if req.Stream {
 		s.streamChat(w, r, upReq, model, key, timeout, start)

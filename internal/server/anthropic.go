@@ -73,10 +73,7 @@ func (s *Server) handleAnthropicMessages(w http.ResponseWriter, r *http.Request)
 		Files:      files,
 	}
 	key := extractKey(r)
-	timeout := time.Duration(settings.RequestTimeout) * time.Second
-	if timeout <= 0 {
-		timeout = 300 * time.Second
-	}
+	timeout := s.requestTimeout()
 
 	if req.Stream {
 		s.streamAnthropic(w, r, upReq, model, key, timeout, start)

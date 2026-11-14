@@ -7,60 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 )
-
-// CSRF token 的本地缓存时长。
-//
-// 桌面端在访问 passport 相关 URL 时会主动刷新；实测 token 有效期远长于 10 分钟，
-// 这里取 30 分钟，既避免每次请求都多一跳，又能在过期后自动恢复。
-const csrfTTL = 30 * time.Minute
-
-// webTabID 返回账号固定 web_tab_id；未初始化时生成并写回。
-func (a *Account) webTabID() string {
-	a.csrfMu.Lock()
-	defer a.csrfMu.Unlock()
-	if a.WebTabID == "" {
-		a.WebTabID = NewUUID()
-	}
-	return a.WebTabID
-}
-
-// cachedCSRF 返回未过期的缓存 token（空串表示需要刷新）。
-func (a *Account) cachedCSRF() string {
-	a.csrfMu.Lock()
-	defer a.csrfMu.Unlock()
-	if a.CSRFTokenValue == "" {
-		return ""
-	}
-	if a.CSRFTokenAt > 0 && time.Since(time.Unix(a.CSRFTokenAt, 0)) > csrfTTL {
-		return ""
-	}
-	return a.CSRFTokenValue
-}
-
-// setCSRF 写入刷新得到的 token。
-func (a *Account) setCSRF(token string) {
-	if token == "" {
-		return
-	}
-	a.csrfMu.Lock()
-	a.CSRFTokenValue = token
-	a.CSRFTokenAt = time.Now().Unix()
-	a.csrfMu.Unlock()
-}
-
-// needsCSRFRefresh 报告当前是否需要刷新。
-func (a *Account) needsCSRFRefresh() bool {
-	a.csrfMu.Lock()
-	defer a.csrfMu.Unlock()
-	if a.CSRFTokenValue != "" {
-		// 已经刷新过：过期就再刷一次。
-		return a.CSRFTokenAt == 0 || time.Since(time.Unix(a.CSRFTokenAt, 0)) > csrfTTL
-	}
-	// 从未刷新过时，Cookie 里的 token 仍可用就不必预刷新。
-	return a.Cookies["passport_csrf_token"] == "" && a.Cookies["passport_csrf_token_default"] == ""
-}
 
 // RefreshCSRF 调用 /passport/safe/csrf_token/ 刷新 CSRF token 并写入账号缓存。
 //
@@ -101,13 +48,13 @@ func (c *Client) RefreshCSRF(ctx context.Context, a *Account) (string, error) {
 		}
 		return "", fmt.Errorf("CSRF 刷新未返回 token: %s", truncate(string(raw), 200))
 	}
-	a.setCSRF(out.Data.PassportCSRFToken)
+	a.SetCSRF(out.Data.PassportCSRFToken)
 	return out.Data.PassportCSRFToken, nil
 }
 
 // ensureCSRF 在必要时刷新 token；force=true 时强制刷新。
 func (c *Client) ensureCSRF(ctx context.Context, a *Account, force bool) error {
-	if !force && !a.needsCSRFRefresh() {
+	if !force && !a.NeedsCSRFRefresh() {
 		return nil
 	}
 	_, err := c.RefreshCSRF(ctx, a)
