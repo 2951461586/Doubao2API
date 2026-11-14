@@ -9,10 +9,15 @@
 ### Fixed
 
 - **控制台图标尺寸过小**：`favicon.ico` 之前只有 16/32/48 三帧，高分屏标签页与
-  任务栏会拿 48px 拉伸，显得模糊偏小。改用客户端图标的 16/32/48/64/128/256
-  **六档原生帧**（133 KB），并按 iOS 要求新增 180×180 `apple-touch-icon.png`
-  （iOS 不认 ICO）；页面 `rel="icon"` 的 `sizes` 同步，两个资源均为
-  `public, max-age=86400`、仅 GET/HEAD。
+  任务栏会拿 48px 拉伸，显得模糊偏小。改为 16/24/32/48/64/128/256 **七档原生帧**
+  并量化到 256 色调色板（133 KB → **32 KB**，与同类项目同一量级）；
+  按 iOS 要求新增 180×180 `apple-touch-icon.png`（50 KB → 9 KB，iOS 不认 ICO），
+  `assets/logo.png` 同步量化（86 KB → 14 KB）。
+- **图标缓存语义**：从 `max-age=86400` 改为 **ETag + `Cache-Control: no-cache`**，
+  命中 `If-None-Match` 回 304 —— 升级后不会继续显示旧图标，未变化时不重复下载
+  （对齐同类项目的做法）；仍仅允许 GET/HEAD。
+- 新增 `internal/server/console_favicon_test.go`：校验图标魔数 / Content-Type /
+  nosniff / ETag / 304 / 405，并断言 ICO 含 256px 帧（防止回退成小尺寸）。
 - **上游业务错误被当成账号故障**：`withAccountRetry` / `withAccount` 曾把任意上游错误
   都记到使用的账号上。线上实测后果：积分活动下线后 `/v1/tasks` 回
   `code=2 campaign not found`，三个账号全被标红、`/health` 报 `ready: 0`，
