@@ -68,22 +68,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${GITHUB_REF_NAME}"
+          ver="${tag#v}"
 
-          # annotated tag 才有说明可用；轻量 tag 回退到 GitHub 自动生成。
-          if [ "$(git cat-file -t "$tag")" = "tag" ]; then
-            notes="--notes-from-tag"
-          else
-            notes="--generate-notes"
-          fi
+          # 直接从 CHANGELOG 取该版本小节作为 release notes：不依赖 annotated tag
+          # （checkout 可能把 tag 解析成 commit），且与 scripts/release.sh 用同一来源。
+          awk -v ver="$ver" '
+            index($0, "## [" ver "]") { flag = 1; next }
+            flag && /^## / { exit }
+            flag { n++; line[n] = $0; if (NF) last = n }
+            END { for (i = 1; i <= last; i++) print line[i] }
+          ' CHANGELOG.md > release-notes.md
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag 已存在，仅上传并覆盖附件"
+            echo "Release $tag 已存在：覆盖附件并同步说明"
             gh release upload "$tag" dist/* --clobber
+            gh release edit "$tag" --notes-file release-notes.md
           else
             gh release create "$tag" dist/* \
               --verify-tag \
               --title "Doubao2API ${tag}" \
-              "$notes"
+              --notes-file release-notes.md
           fi
 
           echo "::notice::https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}"
