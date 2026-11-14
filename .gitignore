@@ -16,6 +16,9 @@ __pycache__/
 *.pyc
 .ruff_cache/
 
+# 发布产物
+dist/
+
 # 测试与覆盖率产物
 coverage.out
 coverage.html

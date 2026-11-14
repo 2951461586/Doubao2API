@@ -12,7 +12,7 @@ LDFLAGS  := -s -w -X main.version=$(VERSION)
 GOFLAGS  :=
 PKGS     := ./...
 
-.PHONY: all build run fmt fmt-check vet test race cover check docker probe clean help
+.PHONY: all build run fmt fmt-check vet test race cover check docker probe dist release clean help
 
 all: check build
 
@@ -51,8 +51,19 @@ docker: ## 构建镜像
 probe: ## 上游探测（ARGS 透传给 cmd/probe）
 	go run ./cmd/probe $(ARGS)
 
+dist: ## 交叉编译发布产物到 dist/（版本号来自 git describe）
+	@mkdir -p dist
+	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-windows-amd64.exe .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-linux-amd64 .
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-darwin-arm64 .
+	@ls -lh dist
+
+release: ## 打发布 tag（用法: make release VERSION=v0.1.0）
+	@sh scripts/release.sh $(VERSION)
+
 clean: ## 清理构建与测试产物
 	rm -f $(BINARY) $(BINARY).exe coverage.out coverage.html
+	rm -rf dist
 	go clean -testcache
 
 help: ## 列出全部目标

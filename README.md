@@ -6,6 +6,8 @@
 复用桌面端已登录的会话凭据，无需另申请密钥；纯 Go 标准库实现，单文件约 10 MB，
 零外部依赖。
 
+当前版本 **v0.1.0**（变更见 [CHANGELOG](CHANGELOG.md)）· Apache-2.0
+
 ```text
 ┌──────────────┐   /v1/chat/completions   ┌─────────────┐   Cookie + CSRF 头   ┌────────────────────────┐
 │ 客户端        │   /v1/models             │ Doubao2API  │  ──────────────────▶ │ www.doubao.com         │
