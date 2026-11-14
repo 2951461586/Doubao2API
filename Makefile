@@ -53,7 +53,7 @@ probe: ## 上游探测（ARGS 透传给 cmd/probe）
 
 dist: ## 交叉编译发布产物到 dist/（版本号来自 git describe）
 	@mkdir -p dist
-	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-windows-amd64.exe .
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-windows-amd64.exe .
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-linux-amd64 .
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$(BINARY)-$(VERSION)-darwin-arm64 .
 	@ls -lh dist

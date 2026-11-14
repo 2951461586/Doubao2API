@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `.github/workflows/release.yml`：推送 `v*` tag 即自动发布 —— 校验 CHANGELOG 小节、
+  跑 fmt / vet / `-race`、交叉构建三平台产物与 `SHA256SUMS`，然后建 Release
+  （已存在则覆盖附件，兼容重跑）。
+- README 新增「下载预编译产物」入口（含各平台文件名与校验方式）。
+
+### Fixed
+
+- `make dist` 的 Windows 产物此前未显式指定 `GOOS`：在 Linux runner 上会产出
+  ELF 却命名为 `.exe`。现已固定 `GOOS=windows GOARCH=amd64`。
+- CI 中的 `actions/checkout`、`actions/setup-go` 固定到 commit SHA；发布链路关闭
+  checkout 的凭据持久化（避免 token 落进 `.git/config`）。
+
 ## [0.1.0] - 2026-11-14
 
 **首个正式版本。** 把本机豆包（DoubaoWork）桌面端的上游服务复刻成 OpenAI 兼容的

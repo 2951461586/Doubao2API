@@ -6,7 +6,8 @@
 复用桌面端已登录的会话凭据，无需另申请密钥；纯 Go 标准库实现，单文件约 10 MB，
 零外部依赖。
 
-当前版本 **v0.1.0**（变更见 [CHANGELOG](CHANGELOG.md)）· Apache-2.0
+当前版本 **v0.1.0** · 预编译产物见 [Releases](https://github.com/2951461586/Doubao2API/releases/latest) ·
+变更见 [CHANGELOG](CHANGELOG.md) · Apache-2.0
 
 ```text
 ┌──────────────┐   /v1/chat/completions   ┌─────────────┐   Cookie + CSRF 头   ┌────────────────────────┐
@@ -69,7 +70,26 @@ make cover        # 覆盖率报告
 
 ## 快速开始
 
-### 1. 编译与运行
+### 1. 下载预编译产物（推荐）
+
+从 [Releases](https://github.com/2951461586/Doubao2API/releases/latest) 下载对应平台：
+
+| 平台 | 文件 |
+| --- | --- |
+| Windows x64 | `doubao2api-vX.Y.Z-windows-amd64.exe` |
+| Linux x64 | `doubao2api-vX.Y.Z-linux-amd64` |
+| macOS（Apple Silicon） | `doubao2api-vX.Y.Z-darwin-arm64` |
+
+每个 Release 同时提供 `SHA256SUMS`，下载后可校验：
+
+```bash
+sha256sum -c SHA256SUMS          # Linux
+shasum -a 256 -c SHA256SUMS      # macOS
+```
+
+> 没有对应平台？用下面的源码编译，或直接跑 Docker（第 5 节）。
+
+### 2. 从源码编译
 
 ```bash
 go build -ldflags="-s -w" -o doubao2api .
@@ -84,14 +104,14 @@ go build -ldflags="-s -w" -o doubao2api .
 2026/01/01 09:00:00 Doubao2API 已启动: http://127.0.0.1:10086/
 ```
 
-### 2. 只导入一次
+### 3. 只导入一次
 
 ```bash
 ./doubao2api -import          # 自动探测并导入后退出
 ./doubao2api -import -doubao-dir "D:\path\to\User Data"
 ```
 
-### 3. 调用
+### 4. 调用
 
 ```bash
 curl http://127.0.0.1:10086/v1/chat/completions \
@@ -99,7 +119,7 @@ curl http://127.0.0.1:10086/v1/chat/completions \
   -d '{"model":"doubao-think","messages":[{"role":"user","content":"你好"}],"stream":true}'
 ```
 
-### 4. Docker 一键部署
+### 5. Docker 一键部署
 
 镜像只打包一个静态 Go 二进制（≈ 6 MB），构建阶段不需要联网拉依赖
 （纯标准库，`go.mod` 无 require）。

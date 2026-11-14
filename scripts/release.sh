@@ -53,7 +53,7 @@ trap 'rm -f "$tmp"' EXIT
 git tag -a --cleanup=verbatim "$ver" -F "$tmp"
 echo "==> 已创建 tag ${ver}"
 echo
-echo "推送："
+echo "推送（推 tag 会触发 .github/workflows/release.yml 自动建 Release 并上传产物）："
 echo "  git push origin HEAD"
 echo "  git push origin ${ver}"
 echo
