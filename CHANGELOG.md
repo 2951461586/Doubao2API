@@ -6,7 +6,20 @@
 
 ## [Unreleased]
 
-（无）
+### Fixed
+
+- **上游业务错误被当成账号故障**：`withAccountRetry` / `withAccount` 曾把任意上游错误
+  都记到使用的账号上。线上实测后果：积分活动下线后 `/v1/tasks` 回
+  `code=2 campaign not found`，三个账号全被标红、`/health` 报 `ready: 0`，
+  且每个请求为同一错误换号重试 3 次白白多打上游。
+  现在按错误归属分流（`internal/doubao/errors.go`）：
+  - **账号级**（认证 / 会话 / 额度 / 限流 / HTTP 401/403）→ 记失败 + 换号重试
+  - **业务/配置级**（`campaign not found`、`common invalid param` 等上游结构化业务码）
+    → 立即返回，不记账号、不重试
+  - 网络错误 / 超时 → 可重试，但不记账号
+  同时把流式路径的上游错误改为 `*doubao.Error`，让分类不只依赖字符串匹配。
+  验证：业务错误下 `ready` 保持 3、账号 `failures=0`、`tasks` 只产生 1 条日志；
+  坏会话账号返回 `login invalid` 时该账号 `failures=1`、`ready` 降为 2。
 
 ## [0.1.2] - 2026-11-14
 

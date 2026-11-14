@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"strings"
 
 	"doubao2api/internal/doubao"
@@ -54,7 +53,7 @@ func (c *responseCollector) absorb(ch doubao.CompletionChunk) (chunkDelta, error
 		c.convID = ch.ConvID
 	}
 	if ch.ErrorCode != 0 {
-		return chunkDelta{}, fmt.Errorf("上游错误 %d: %s", ch.ErrorCode, ch.ErrorMsg)
+		return chunkDelta{}, &doubao.Error{Code: ch.ErrorCode, Msg: ch.ErrorMsg}
 	}
 
 	var d chunkDelta

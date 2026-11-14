@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -68,7 +67,7 @@ func (s *Server) handleImageGenerations(w http.ResponseWriter, r *http.Request) 
 		func(ctx context.Context, acct *doubao.Account) (int, error) {
 			err := s.Up.ChatStream(ctx, acct, upReq, func(c doubao.CompletionChunk) error {
 				if c.ErrorCode != 0 {
-					return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+					return &doubao.Error{Code: c.ErrorCode, Msg: c.ErrorMsg}
 				}
 				for _, cr := range c.Creations {
 					if cr.URL == "" || seen[cr.ID] {

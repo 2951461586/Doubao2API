@@ -760,7 +760,7 @@ func (c *Client) RunDailyTasks(ctx context.Context, a *Account, group string, ma
 				convID = ch.ConvID
 			}
 			if ch.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", ch.ErrorCode, ch.ErrorMsg)
+				return &Error{Code: ch.ErrorCode, Msg: ch.ErrorMsg}
 			}
 			return nil
 		})

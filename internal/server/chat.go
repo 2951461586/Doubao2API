@@ -375,7 +375,7 @@ func imageAttachmentFromURL(raw string) doubao.ImageAttachment {
 func (s *Server) probeAccount(ctx context.Context, a *doubao.Account) error {
 	return s.Up.ChatStream(ctx, a, doubao.ChatRequest{Text: "hi", ThinkLevel: doubao.ThinkOff}, func(c doubao.CompletionChunk) error {
 		if c.ErrorCode != 0 {
-			return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+			return &doubao.Error{Code: c.ErrorCode, Msg: c.ErrorMsg}
 		}
 		return nil
 	})

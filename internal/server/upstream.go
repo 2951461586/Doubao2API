@@ -39,10 +39,12 @@ func (s *Server) withAccount(ctx context.Context, id string, timeout time.Durati
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := fn(cctx, a)
-	if err != nil {
-		s.Store.MarkAccountResult(a.ID, false, err.Error())
-	} else {
+	switch {
+	case err == nil:
 		s.Store.MarkAccountResult(a.ID, true, "")
+	case doubao.IsAccountScopedError(err):
+		// 业务 / 配置类错误不该记到账号头上（见 withAccountRetry 的说明）。
+		s.Store.MarkAccountResult(a.ID, false, err.Error())
 	}
 	return a, err
 }
@@ -80,9 +82,13 @@ func (s *Server) withAccountRetry(ctx context.Context, timeout time.Duration, fn
 			return acct, nil
 		}
 		lastErr = err
-		s.Store.MarkAccountResult(acct.ID, false, err.Error())
-		// 上下文被取消（客户端断开）时不再重试
-		if ctx.Err() != nil {
+		// 只有「账号级」错误才记失败：业务 / 配置类错误（如 campaign not found）
+		// 换任何账号都一样，记上去会让整池账号变红、/health 误报 ready: 0。
+		if doubao.IsAccountScopedError(err) {
+			s.Store.MarkAccountResult(acct.ID, false, err.Error())
+		}
+		// 客户端断开、或业务错误重试无意义时，不再换号
+		if ctx.Err() != nil || !doubao.ShouldRetryWithAnotherAccount(err) {
 			break
 		}
 	}

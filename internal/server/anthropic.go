@@ -96,7 +96,7 @@ func (s *Server) blockingAnthropic(w http.ResponseWriter, r *http.Request, upReq
 		}
 		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
 			if c.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+				return &doubao.Error{Code: c.ErrorCode, Msg: c.ErrorMsg}
 			}
 			out.WriteString(c.Text)
 			thinking.WriteString(c.Thinking)
@@ -196,7 +196,7 @@ func (s *Server) streamAnthropic(w http.ResponseWriter, r *http.Request, upReq d
 		}
 		return s.Up.ChatStream(ctx, acct, req, func(c doubao.CompletionChunk) error {
 			if c.ErrorCode != 0 {
-				return fmt.Errorf("上游错误 %d: %s", c.ErrorCode, c.ErrorMsg)
+				return &doubao.Error{Code: c.ErrorCode, Msg: c.ErrorMsg}
 			}
 			if c.Thinking != "" {
 				openBlock("thinking")
