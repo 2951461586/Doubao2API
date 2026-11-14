@@ -138,7 +138,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	upReq := doubao.ChatRequest{
 		Text:            text,
 		ThinkLevel:      thinkLevel,
-		AgentMode:       model.AgentMode,
+		AgentMode:       resolveAgentMode(model, extras),
 		BotID:           req.BotID,
 		ConversationID:  req.ConversationID,
 		SkillID:         skillID,
@@ -233,8 +233,18 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	created := time.Now().Unix()
 	outLen := 0
 
+	// writeChunk 写一帧确切的 chunk JSON。
+	writeChunk := func(chunk map[string]any) {
+		raw, err := json.Marshal(chunk)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
+		flusher.Flush()
+	}
+
 	send := func(delta map[string]any, finish any) {
-		chunk := map[string]any{
+		writeChunk(map[string]any{
 			"id":      id,
 			"object":  "chat.completion.chunk",
 			"created": created,
@@ -244,13 +254,29 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 				"delta":         delta,
 				"finish_reason": finish,
 			}},
-		}
-		raw, err := json.Marshal(chunk)
-		if err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", raw)
-		flusher.Flush()
+		})
+	}
+
+	// sendError 写一帧结构化错误：finish_reason=error + 顶层 error 字段。
+	//
+	// 不能把错误文案当成正文 delta 下发——SDK 会当正常回复收下，
+	// 并在 finish_reason=stop 时认为请求成功。
+	sendError := func(err error) {
+		writeChunk(map[string]any{
+			"id":      id,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   model.ID,
+			"choices": []any{map[string]any{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": "error",
+			}},
+			"error": map[string]any{
+				"type":    "upstream_error",
+				"message": err.Error(),
+			},
+		})
 	}
 
 	// 首块先发 role，符合 OpenAI 约定
@@ -298,10 +324,10 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, upReq doubao
 	})
 	if err != nil {
 		streamErr = err
-		send(map[string]any{"content": "\n[错误] " + err.Error()}, nil)
+		sendError(err)
+	} else {
+		send(map[string]any{}, "stop")
 	}
-
-	send(map[string]any{}, "stop")
 	_, _ = io.WriteString(w, "data: [DONE]\n\n")
 	flusher.Flush()
 
@@ -525,17 +551,35 @@ func firstString(vals ...any) string {
 
 // newCreationURLs 提取尚未出现过的生成产物 URL。
 //
-// 上游会分多个 patch 重复推送同一个 creation，因此按 ID 去重。
+// 上游会分多个 patch 重复推送同一个 creation，因此按 ID 去重；
+// 少数情况下 creation 不带 id，此时退化为按 URL 去重，
+// 避免空 ID 把后续所有产物一起吞掉。
 func newCreationURLs(creations []doubao.Creation, seen map[string]bool) []string {
 	var urls []string
 	for _, cr := range creations {
-		if cr.URL == "" || seen[cr.ID] {
+		if cr.URL == "" {
 			continue
 		}
-		seen[cr.ID] = true
+		key := cr.ID
+		if key == "" {
+			key = "url:" + cr.URL
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		urls = append(urls, cr.URL)
 	}
 	return urls
+}
+
+// resolveAgentMode 决定是否按工作模式下发：模型自带的 AgentMode 优先
+// （工作模式模型必须为 1），其次才看请求里的 agent_mode / doubao.agent_mode。
+func resolveAgentMode(model registry.Model, extras chatRequest) int {
+	if model.AgentMode != 0 {
+		return model.AgentMode
+	}
+	return extras.AgentMode
 }
 
 // resolveSkill 解析请求里的技能字段（名称 / 别名 / 数值）。

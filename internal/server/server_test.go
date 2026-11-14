@@ -356,6 +356,9 @@ func TestHandleHealth(t *testing.T) {
 		if body["accounts"] != float64(1) || body["ready"] != float64(1) {
 			t.Errorf("%s 账号统计不对: %v", path, body)
 		}
+		if _, ok := body["non_json_events"]; !ok {
+			t.Errorf("%s 应暴露 non_json_events: %v", path, body)
+		}
 	}
 
 	req := newReq("GET", "/ping", "", loopbackAddr)

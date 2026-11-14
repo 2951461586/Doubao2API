@@ -343,6 +343,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accts),
 		"ready":    ok,
 		"models":   len(registry.Builtin),
+		// 非 JSON SSE 事件数：持续增长说明上游协议漂移，
+		// 这些事件会被跳过（详见 doubao.ParseStats）。
+		"non_json_events": s.Up.NonJSONEvents(),
 	})
 }
 
