@@ -79,6 +79,8 @@ func main() {
 	autoCtx, stopAuto := context.WithCancel(context.Background())
 	defer stopAuto()
 	srv.StartAutoRewards(autoCtx)
+	// 待确认签到的后台复查（默认关闭，开启 retry_pending_checkin 后每小时一次）。
+	srv.StartPendingCheckinRetry(autoCtx)
 
 	addr := net.JoinHostPort(*host, fmt.Sprintf("%d", *port))
 	// 启动时就把「对外监听 + 无密钥」这类组合点名，避免误暴露后才被发现。

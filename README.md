@@ -194,7 +194,8 @@ docker run -d --name doubao2api --restart unless-stopped \
 
 控制台内还可调：模型别名、请求超时、重试次数、日志保留条数、CORS 来源、
 自动签到（`auto_checkin`）、自动领取已完成任务奖励（`auto_claim_tasks`）、
-自动做任务（`auto_do_tasks`）、无密钥模式是否放行非本机（`allow_anonymous`）。
+自动做任务（`auto_do_tasks`）、待确认签到的后台重试（`retry_pending_checkin`）、
+无密钥模式是否放行非本机（`allow_anonymous`）。
 ## 许可证
 
 本项目以 [Apache License 2.0](LICENSE) 授权发布。许可证覆盖的是**本项目自身的代码**；

@@ -308,6 +308,22 @@ GET /passport/safe/csrf_token/?aid=…&device_id=…
 | `3` | **领取结果确认中，请稍后重试**（异步发放） | `pending`（短暂重试 3 次后仍为 3 就如实回报） |
 | 其它 | 真失败 | `failed` |
 
+#### 待确认签到的后台重试队列
+
+上游把签到奖励做成异步发放，因此 `/v1/checkin` 可能返回 `pending`。
+网关把这情况登记进状态文件（`pending_checkin_date` / `pending_checkin_at` /
+`pending_checkin_tries`），并在开启 `retry_pending_checkin` 后每小时复查一次：
+
+| 处置 | 条件 |
+| --- | --- |
+| 重试 | 记录是今天的，且重试次数 < 6 |
+| 作废 | 记录跨天（签到按天幂等，昨天的 pending 已无意义） |
+| 放弃 | 今日已重试 6 次；记录保留，控制台可见 |
+
+复查成功（`checked_in && !pending`）会把账号补成「已签到」并写入奖励额度，
+之后 `/v1/tasks` 的 `daily_checkin.checked_in_today` 即为 `true`。
+也可以手动催一次：`POST /admin/api/checkin/retry`（仍受开关约束）。
+
 > **已知上游限制（2026-11-14 实测）**：`daily_signin` 任务能创建实例
 > （`task_status=4 in_progress`）、能提交领取，但领取恒返回 `biz_code=3`，
 > 且 `daily_checkin.checked_in_today` 始终为 `false` —— 说明**真正的签到动作

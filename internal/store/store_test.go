@@ -743,3 +743,61 @@ func TestConcurrentReadWriteSave(t *testing.T) {
 		t.Fatalf("最终落盘失败: %v", err)
 	}
 }
+
+// TestCheckinPendingLifecycle 覆盖待确认签到的登记 / 重试计数 / 清除。
+//
+// 语义：登记(MarkCheckinPending)不计数，重试(RecordCheckinRetry)才 +1；
+// 跨天登记会重置次数（签到按天幂等）。
+func TestCheckinPendingLifecycle(t *testing.T) {
+	s := newStore(t)
+	s.UpsertAccount(testAccount("a1", "s1"))
+
+	if !s.MarkCheckinPending("a1", "2026-11-14") {
+		t.Fatal("登记失败")
+	}
+	a := s.Account("a1")
+	if a.PendingCheckinDate != "2026-11-14" || a.PendingCheckinTries != 0 || a.PendingCheckinAt == 0 {
+		t.Fatalf("登记后状态不对（应 tries=0）: %+v", a)
+	}
+
+	if !s.RecordCheckinRetry("a1", "2026-11-14") || !s.RecordCheckinRetry("a1", "2026-11-14") {
+		t.Fatal("记录重试失败")
+	}
+	if a = s.Account("a1"); a.PendingCheckinTries != 2 {
+		t.Errorf("重试次数 = %d, want 2", a.PendingCheckinTries)
+	}
+
+	// 队列快照只包含有待确认项的账号，且是副本。
+	pending := s.PendingCheckins()
+	if len(pending) != 1 || pending[0].ID != "a1" {
+		t.Fatalf("PendingCheckins() = %+v", pending)
+	}
+	pending[0].PendingCheckinTries = 99
+	if s.Account("a1").PendingCheckinTries != 2 {
+		t.Error("PendingCheckins 应返回副本")
+	}
+
+	// 跨天登记重置计数。
+	s.MarkCheckinPending("a1", "2026-11-15")
+	if a = s.Account("a1"); a.PendingCheckinDate != "2026-11-15" || a.PendingCheckinTries != 0 {
+		t.Errorf("跨天应重置次数: %+v", a)
+	}
+
+	if !s.ClearCheckinPending("a1") {
+		t.Fatal("清除失败")
+	}
+	if a = s.Account("a1"); a.PendingCheckinDate != "" || a.PendingCheckinTries != 0 || a.PendingCheckinAt != 0 {
+		t.Errorf("清除后仍残留: %+v", a)
+	}
+	if len(s.PendingCheckins()) != 0 {
+		t.Error("清除后队列应为空")
+	}
+	if s.ClearCheckinPending("a1") {
+		t.Error("重复清除应返回 false")
+	}
+
+	// 未知账号不应 panic。
+	if s.MarkCheckinPending("nope", "") || s.RecordCheckinRetry("nope", "") || s.ClearCheckinPending("nope") {
+		t.Error("未知账号的写操作应返回 false")
+	}
+}

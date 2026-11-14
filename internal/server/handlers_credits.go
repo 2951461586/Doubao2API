@@ -128,8 +128,13 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 只有真正签到成功才写账号状态：上游可能返回「已受理待确认」
-	// （pending），此时不能把日期写死，否则会误判为今天已签到。
+	// 上游可能返回「已受理待确认」(pending)：此时登记到重试队列，
+	// 由后台每小时复查一次；不能把日期写死，否则会误判为今天已签到。
+	if acct != nil && result.Pending {
+		s.Store.MarkCheckinPending(acct.ID, todayString())
+		_ = s.Store.Save()
+	}
+	// 只有真正签到成功才写账号签到日期。
 	if acct != nil && result.CheckedIn && !result.Pending {
 		date := result.CheckinDate
 		if date == "" {

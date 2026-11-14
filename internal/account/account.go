@@ -82,6 +82,12 @@ type Account struct {
 	LastTaskDate  string `json:"last_task_date,omitempty"`
 	LastTaskCount int    `json:"last_task_count,omitempty"`
 
+	// 待确认的签到：上游回「领取结果确认中」(biz_code=3) 时记录，
+	// 由后台重试队列每小时复查一次。日期跨天后视为作废。
+	PendingCheckinDate  string `json:"pending_checkin_date,omitempty"`
+	PendingCheckinAt    int64  `json:"pending_checkin_at,omitempty"`
+	PendingCheckinTries int    `json:"pending_checkin_tries,omitempty"`
+
 	Enabled  bool   `json:"enabled"`
 	Status   string `json:"status"` // ok / error
 	Note     string `json:"note"`

@@ -73,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/api/stats", s.withAdminAuth(s.handleAdminStats))
 	mux.HandleFunc("/admin/api/settings", s.withAdminAuth(s.handleAdminSettings))
 	mux.HandleFunc("/admin/api/checkin", s.withAdminAuth(s.handleAdminCheckin))
+	mux.HandleFunc("/admin/api/checkin/retry", s.withAdminAuth(s.handleAdminCheckinRetry))
 	mux.HandleFunc("/admin/api/login/qrcode", s.withAdminAuth(s.handleLoginQRCode))
 	mux.HandleFunc("/admin/api/login/qrcode/poll", s.withAdminAuth(s.handleLoginQRCodePoll))
 
@@ -285,17 +286,18 @@ func isLoopbackAddr(remoteAddr string) bool {
 // sanitizedSettings 返回可下发给前端的设置（管理密码不外泄）。
 func sanitizedSettings(st store.Settings) map[string]any {
 	return map[string]any{
-		"model_aliases":       st.ModelAliases,
-		"request_timeout_sec": st.RequestTimeout,
-		"max_retries":         st.MaxRetries,
-		"log_keep":            st.LogKeep,
-		"cors_origin":         st.CORSOrigin,
-		"admin_password_set":  st.AdminPassword != "",
-		"auto_checkin":        st.AutoCheckin,
-		"auto_claim_tasks":    st.AutoClaimTasks,
-		"auto_do_tasks":       st.AutoDoTasks,
-		"auto_task_limit":     st.AutoTaskLimit,
-		"allow_anonymous":     st.AllowAnonymous,
+		"model_aliases":         st.ModelAliases,
+		"request_timeout_sec":   st.RequestTimeout,
+		"max_retries":           st.MaxRetries,
+		"log_keep":              st.LogKeep,
+		"cors_origin":           st.CORSOrigin,
+		"admin_password_set":    st.AdminPassword != "",
+		"auto_checkin":          st.AutoCheckin,
+		"auto_claim_tasks":      st.AutoClaimTasks,
+		"auto_do_tasks":         st.AutoDoTasks,
+		"retry_pending_checkin": st.RetryPendingCheckin,
+		"auto_task_limit":       st.AutoTaskLimit,
+		"allow_anonymous":       st.AllowAnonymous,
 	}
 }
 
@@ -390,6 +392,9 @@ func (s *Server) handleAdminState(w http.ResponseWriter, r *http.Request) {
 			"last_checkin_date": a.LastCheckinDate, "last_checkin_at": a.LastCheckinAt,
 			"last_checkin_reward": a.LastCheckinReward,
 			"last_task_date":      a.LastTaskDate, "last_task_count": a.LastTaskCount,
+			"pending_checkin_date":  a.PendingCheckinDate,
+			"pending_checkin_at":    a.PendingCheckinAt,
+			"pending_checkin_tries": a.PendingCheckinTries,
 		})
 	}
 	keys := s.Store.Keys()
@@ -558,17 +563,18 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ModelAliases   map[string]string `json:"model_aliases"`
-		RequestTimeout *int              `json:"request_timeout_sec"`
-		MaxRetries     *int              `json:"max_retries"`
-		LogKeep        *int              `json:"log_keep"`
-		CORSOrigin     *string           `json:"cors_origin"`
-		AdminPassword  *string           `json:"admin_password"`
-		AutoCheckin    *bool             `json:"auto_checkin"`
-		AutoClaimTasks *bool             `json:"auto_claim_tasks"`
-		AutoDoTasks    *bool             `json:"auto_do_tasks"`
-		AutoTaskLimit  *int              `json:"auto_task_limit"`
-		AllowAnonymous *bool             `json:"allow_anonymous"`
+		ModelAliases        map[string]string `json:"model_aliases"`
+		RequestTimeout      *int              `json:"request_timeout_sec"`
+		MaxRetries          *int              `json:"max_retries"`
+		LogKeep             *int              `json:"log_keep"`
+		CORSOrigin          *string           `json:"cors_origin"`
+		AdminPassword       *string           `json:"admin_password"`
+		AutoCheckin         *bool             `json:"auto_checkin"`
+		AutoClaimTasks      *bool             `json:"auto_claim_tasks"`
+		AutoDoTasks         *bool             `json:"auto_do_tasks"`
+		RetryPendingCheckin *bool             `json:"retry_pending_checkin"`
+		AutoTaskLimit       *int              `json:"auto_task_limit"`
+		AllowAnonymous      *bool             `json:"allow_anonymous"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败", "invalid_request_error")
@@ -601,6 +607,9 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.AutoDoTasks != nil {
 			st.AutoDoTasks = *body.AutoDoTasks
+		}
+		if body.RetryPendingCheckin != nil {
+			st.RetryPendingCheckin = *body.RetryPendingCheckin
 		}
 		if body.AutoTaskLimit != nil {
 			st.AutoTaskLimit = *body.AutoTaskLimit

@@ -40,6 +40,10 @@ type Settings struct {
 	AutoDoTasks bool `json:"auto_do_tasks,omitempty"`
 	// AutoTaskLimit 是每个账号每天自动尝试的任务数上限。
 	AutoTaskLimit int `json:"auto_task_limit,omitempty"`
+	// RetryPendingCheckin 开启后，后台每小时复查「确认中」的签到，直到上游确认。
+	//
+	// 默认关闭：只有在遇到上游异步发放（biz_code=3）时才产生队列项。
+	RetryPendingCheckin bool `json:"retry_pending_checkin,omitempty"`
 	// AllowAnonymous 允许在未签发任何密钥时接受非本机请求。
 	//
 	// 默认关闭：无密钥模式仅放行环回来源，避免误绑 0.0.0.0 后裸奔。
@@ -103,10 +107,12 @@ func DefaultSettings() Settings {
 		// 默认仅放行本机来源；如需局域网访问，在控制台显式配置。
 		CORSOrigin: "",
 		// 自动签到 / 自动领取默认关闭，避免未经确认地修改账号额度。
-		AutoCheckin:    false,
-		AutoClaimTasks: false,
-		AutoDoTasks:    false,
-		AutoTaskLimit:  3,
+		AutoCheckin: false,
+		// 待确认签到的后台重试同样默认关闭（属于自动写操作）。
+		RetryPendingCheckin: false,
+		AutoClaimTasks:      false,
+		AutoDoTasks:         false,
+		AutoTaskLimit:       3,
 		// 无密钥模式默认只放行本机；确需对外提供匿名调用时显式开启。
 		AllowAnonymous: false,
 	}
@@ -359,6 +365,80 @@ func (s *Store) MarkCheckin(id, date string, reward int64) {
 		a.LastCheckinReward = reward
 		return
 	}
+}
+
+// MarkCheckinPending 登记「上游已受理、奖励确认中」的签到。
+//
+// 由 /v1/checkin 在收到 pending 结果时调用。这是登记而非重试，因此不累加
+// 重试次数；换了一天则重新计数（每日签到按天幂等）。
+func (s *Store) MarkCheckinPending(id, date string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false
+	}
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	}
+	if a.PendingCheckinDate != date {
+		a.PendingCheckinTries = 0
+	}
+	a.PendingCheckinDate = date
+	a.PendingCheckinAt = time.Now().Unix()
+	return true
+}
+
+// RecordCheckinRetry 记录一次后台重试（尝试次数 +1）。
+func (s *Store) RecordCheckinRetry(id, date string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false
+	}
+	if date == "" {
+		date = time.Now().Format("2006-01-02")
+	}
+	if a.PendingCheckinDate != date {
+		a.PendingCheckinDate = date
+		a.PendingCheckinTries = 0
+	}
+	a.PendingCheckinTries++
+	a.PendingCheckinAt = time.Now().Unix()
+	return true
+}
+
+// ClearCheckinPending 清除待确认的签到记录。
+func (s *Store) ClearCheckinPending(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.accountLocked(id)
+	if a == nil {
+		return false
+	}
+	if a.PendingCheckinDate == "" && a.PendingCheckinAt == 0 && a.PendingCheckinTries == 0 {
+		return false
+	}
+	a.PendingCheckinDate = ""
+	a.PendingCheckinAt = 0
+	a.PendingCheckinTries = 0
+	return true
+}
+
+// PendingCheckins 返回存在待确认签到的账号快照。
+//
+// 返回的是深拷贝，调用方可以随意读取；是否过期 / 是否放弃由调用方决定。
+func (s *Store) PendingCheckins() []*account.Account {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*account.Account, 0, 4)
+	for _, a := range s.st.Accounts {
+		if a.PendingCheckinDate != "" || a.PendingCheckinAt > 0 {
+			out = append(out, a.Clone())
+		}
+	}
+	return out
 }
 
 // MarkTaskRun 累加自动任务计数。

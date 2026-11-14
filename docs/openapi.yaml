@@ -447,7 +447,7 @@ paths:
                 type: object
                 properties:
                   object: { type: string, const: checkin }
-                  result: { type: object }
+                  result: { $ref: "#/components/schemas/CheckinResult" }
                   account: { $ref: "#/components/schemas/CheckinState" }
         "502": { $ref: "#/components/responses/UpstreamError" }
 
@@ -726,6 +726,36 @@ paths:
                 id: { type: string, description: 缺省探测全部账号 }
       responses:
         "200": { description: 每个账号的探测结果 }
+
+  /admin/api/checkin/retry:
+    post:
+      tags: [admin]
+      summary: 立即复查「确认中」的签到
+      description: |
+        与后台每小时一次的队列是同一套逻辑（仍受 `retry_pending_checkin` 约束），
+        便于上游恢复后手动催一次，或排障时观察队列状态。
+      security:
+        - AdminPassword: []
+      responses:
+        "200":
+          description: 复查结果与仍待确认的账号
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  enabled: { type: boolean, description: retry_pending_checkin 是否开启 }
+                  remain_count: { type: integer }
+                  remaining:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        date: { type: string }
+                        attempts: { type: integer }
 
   /admin/api/login/qrcode:
     post:
@@ -1048,6 +1078,20 @@ components:
         icon_url: { type: string }
         dark_mode_icon_url: { type: string }
 
+    CheckinResult:
+      type: object
+      description: |
+        签到结果。上游把奖励做成异步发放，因此可能返回 `pending=true`
+        （已受理、待确认）；此时 `checked_in` 仍为 false，由后台队列复查。
+      properties:
+        checked_in: { type: boolean }
+        pending: { type: boolean, description: 上游仍在异步确认（biz_code=3） }
+        checkin_date: { type: string, format: date }
+        continuous_days: { type: integer }
+        idempotent: { type: boolean }
+        reward_amount: { type: integer, format: int64 }
+        reward_type: { type: string, example: quota_grant }
+
     CheckinState:
       type: object
       properties:
@@ -1090,6 +1134,9 @@ components:
         last_checkin_reward: { type: integer, format: int64 }
         last_task_date: { type: string }
         last_task_count: { type: integer }
+        pending_checkin_date: { type: string, description: 待确认签到的日期（空表示无） }
+        pending_checkin_at: { type: integer, format: int64 }
+        pending_checkin_tries: { type: integer, description: 已重试次数 }
 
     Settings:
       type: object
@@ -1109,6 +1156,10 @@ components:
         auto_claim_tasks: { type: boolean, default: false }
         auto_do_tasks: { type: boolean, default: false }
         auto_task_limit: { type: integer, default: 3 }
+        retry_pending_checkin:
+          type: boolean
+          default: false
+          description: 开启后每小时复查「确认中」的签到，直到上游确认
         allow_anonymous:
           type: boolean
           default: false

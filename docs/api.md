@@ -68,6 +68,7 @@
 | `/v1/credits` | GET | 积分余额 + 每日登录任务（`?tasks=false` 可省略任务） |
 | `/v1/credits/history` | GET | 积分流水（`size` / `cursor` / `type`） |
 | `/v1/checkin` | POST | 每日签到（返回 `checked_in` / `pending` / 奖励额度） |
+| `/admin/api/checkin/retry` | POST | 立即复查「确认中」的签到（仍受 `retry_pending_checkin` 约束） |
 | `/v1/tasks` | GET | 积分任务 / 里程碑（默认 `pc_incentive_task_mvp_v3`） |
 | `/v1/tasks/claim` | POST | 领取单个任务奖励 |
 | `/v1/tasks/claim-completed` | POST | 自动领取「已完成 / 直接领取」的任务奖励 |

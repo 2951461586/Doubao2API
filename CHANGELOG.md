@@ -46,6 +46,17 @@
 - `/v1/checkin` 只在 `checked_in && !pending` 时写入账号签到日期，
   避免「已受理待确认」被误记成今天已签到。
 
+### Added（待确认签到的重试队列）
+
+- 新增可选开关 `retry_pending_checkin`（默认关闭）与后台队列：`/v1/checkin`
+  收到 `pending` 时把账号登记到状态文件，此后**每小时**复查一次，上游确认后
+  自动补写签到日期与奖励额度。
+- 队列策略：跨天记录作废（签到按天幂等）、当日最多重试 6 次、用尽后保留记录
+  供控制台判断上游是否恢复（而不是悄悄丢弃）。
+- 新增 `POST /admin/api/checkin/retry` 手动催办；`/admin/api/state` 与
+  `/v1/checkin` 的 `account` 字段会带出 `pending_checkin` 详情。
+- 自动签到（`auto_checkin`）会跳过已登记进重试队列的账号，避免重复请求上游。
+
 ### Added
 
 - `internal/ids`：随机标识叶子包（UUID / 十六进制 / 数字串）。
