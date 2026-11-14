@@ -48,7 +48,9 @@ trap 'rm -f "$tmp"' EXIT
 	' CHANGELOG.md
 } >"$tmp"
 
-git tag -a "$ver" -F "$tmp"
+# --cleanup=verbatim：默认的 strip 模式会把 CHANGELOG 里 "#" 开头的
+# Markdown 标题当成注释删掉，tag 说明会丢掉层级。
+git tag -a --cleanup=verbatim "$ver" -F "$tmp"
 echo "==> 已创建 tag ${ver}"
 echo
 echo "推送："
