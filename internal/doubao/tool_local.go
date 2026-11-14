@@ -80,15 +80,19 @@ func (c *Client) FetchAgentMiss(ctx context.Context, a *Account, agentID, agentT
 	if agentType == "" {
 		agentType = ToolAgentType
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 10
+	// 客户端固定用 100；begin_seq 未设置时**整字段省略**（不是传 0）。
+	if limit <= 0 || limit > 100 {
+		limit = 100
 	}
-	raw, err := c.postJSON(ctx, a, "/alice/office/tool_local/msg/fetch_agent_miss", map[string]any{
+	body := map[string]any{
 		"agent_id":   agentID,
 		"agent_type": agentType, // 必须是字符串
-		"begin_seq":  beginSeq,
 		"limit":      limit,
-	})
+	}
+	if beginSeq > 0 {
+		body["begin_seq"] = beginSeq
+	}
+	raw, err := c.postJSON(ctx, a, "/alice/office/tool_local/msg/fetch_agent_miss", body)
 	if err != nil {
 		return nil, err
 	}

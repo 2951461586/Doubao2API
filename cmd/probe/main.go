@@ -18,8 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"doubao2api/internal/agent"
 	"doubao2api/internal/doubao"
 	"doubao2api/internal/store"
+	"doubao2api/internal/workturn"
 )
 
 func readArg(s string) string {
@@ -70,6 +72,11 @@ func main() {
 	base := flag.String("base", doubao.UpstreamBase, "上游 host（如 https://accounts.doubao.com）")
 	lazy := flag.Bool("lazy", false, "option.support_lazy_fetch_stream=true（A/B 用）")
 	dump := flag.Bool("dump", false, "只打印将要发送的请求体（不请求上游），便于对照协议")
+	turnWS := flag.String("workturn", "", "工作模式全链路：传工作区目录，跑「流+轮询+工具执行」一次回合")
+	mkey := flag.String("mkey", "person-deepseek-v4-1-flash-261017", "工作模式模型 model_item_key")
+	rawMsg := flag.Bool("raw", false, "打印工具通道的原始消息（校准报文形状用）")
+	shell := flag.Bool("shell", false, "允许工具执行命令（默认关闭，仅白名单）")
+	allow := flag.String("allow", "go,git", "命令白名单（逗号分隔，配合 -shell）")
 	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
 	maxOut := flag.Int("max", 200000, "JSON 打印上限（字节，0 = 不截断）")
 	flag.Parse()
@@ -103,6 +110,76 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("uri =", uri)
+		return
+	}
+
+	if *turnWS != "" {
+		box, err := agent.New(*turnWS, "")
+		if err != nil {
+			fmt.Println("沙箱初始化失败:", err)
+			os.Exit(1)
+		}
+		box.AllowShell = *shell
+		if *shell {
+			box.ShellAllow = strings.Split(*allow, ",")
+		}
+		if *dump {
+			req := doubao.ChatRequest{Text: *chat, ThinkLevel: *think, AgentMode: 1,
+				ModelItemKey: *mkey, ModeID: "3", ReasoningEffort: "4"}
+			payload := doubao.BuildPayload(a, req)
+			out, _ := json.MarshalIndent(payload, "", "  ")
+			os.Stdout.Write(out)
+			fmt.Println()
+			return
+		}
+
+		c := doubao.NewClient()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		tools := 0
+		res, err := workturn.Run(ctx, c, c, a, box, workturn.Options{
+			Text:            *chat,
+			ThinkLevel:      *think,
+			ModelItemKey:    *mkey,
+			ModeID:          "3",
+			ReasoningEffort: "4",
+			PollInterval:    1200 * time.Millisecond,
+			PollWindow:      8 * time.Second,
+			OnTool: func(ev workturn.ToolEvent) {
+				tools++
+				status := "ok"
+				if ev.Err != nil {
+					status = "err: " + ev.Err.Error()
+				}
+				inputJSON, _ := json.Marshal(ev.Input)
+				fmt.Printf("TOOL %-14s %s input=%s\n", ev.Name, status, string(inputJSON))
+			},
+			OnPoll: func(expired bool, count int, err error) {
+				if *rawMsg {
+					if err != nil {
+						fmt.Println("POLL err:", err)
+					} else {
+						fmt.Printf("POLL expired=%v msgs=%d\n", expired, count)
+					}
+				}
+			},
+			OnRawMsg: func(m map[string]any) {
+				if !*rawMsg {
+					return
+				}
+				raw, _ := json.MarshalIndent(m, "", "  ")
+				fmt.Println("RAWMSG", string(raw))
+			},
+		})
+		fmt.Printf("\nagent_id=%s conv=%s sandbox=%s tools=%d\n", res.AgentID, res.ConversationID, res.SandboxID, tools)
+		fmt.Printf("REPLY: %s\n", res.Text)
+		if err != nil {
+			fmt.Println("err:", err)
+		}
+		if res.AgentID == "" {
+			fmt.Println("提示: 未拿到 agent_id（可能该模型不支持工作模式或本轮没有 agent 壳）")
+		}
 		return
 	}
 

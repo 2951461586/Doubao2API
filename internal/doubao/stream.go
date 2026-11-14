@@ -22,8 +22,9 @@ type streamState struct {
 	// 第 1 个容器内的文本算思维链，之后算正文（上游的补丁流约定）。
 	thinkingCount int
 
-	seen     map[string]bool // 结构化产物去重（代码 / 来源 / 图片 / 音乐 / 产物）
-	seenTool map[string]bool // 工具提示去重
+	agentSent bool            // agent_id 只上报一次
+	seen      map[string]bool // 结构化产物去重（代码 / 来源 / 图片 / 音乐 / 产物）
+	seenTool  map[string]bool // 工具提示去重
 }
 
 // parseStream 解析上游 SSE，把增量回调给调用方。
@@ -99,6 +100,16 @@ func (st *streamState) handleEvent(ev SSEEvent) error {
 	obj, ok := decodeObj(ev.Data)
 	if !ok {
 		return nil // 非 JSON 事件直接跳过
+	}
+
+	// 工作模式：STREAM_MSG_NOTIFY 首帧带 agent_id，工具通道要用它。
+	if !st.agentSent {
+		if aid := findStringField(obj, "agent_id", 4); aid != "" {
+			st.agentSent = true
+			if err := st.onChunk(CompletionChunk{AgentID: aid}); err != nil {
+				return err
+			}
+		}
 	}
 
 	// 会话建立
@@ -178,4 +189,29 @@ func iterBlocks(obj map[string]any) []map[string]any {
 		}
 	}
 	return out
+}
+
+// findStringField 在嵌套对象里查找第一个非空字符串字段（限定深度，避免大对象递归）。
+func findStringField(v any, key string, depth int) string {
+	if depth <= 0 || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		if s, ok := t[key].(string); ok && s != "" {
+			return s
+		}
+		for _, child := range t {
+			if s := findStringField(child, key, depth-1); s != "" {
+				return s
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if s := findStringField(child, key, depth-1); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }

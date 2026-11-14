@@ -125,10 +125,14 @@ type Account = account.Account
 
 // CompletionChunk 是从上游 SSE 解析出的一个增量。
 type CompletionChunk struct {
-	Text      string // 正文增量
-	Thinking  string // 思维链增量
-	ToolInfo  string // 工具/搜索提示
-	ConvID    string // 会话 ID（首个 SSE_ACK 给出）
+	Text     string // 正文增量
+	Thinking string // 思维链增量
+	ToolInfo string // 工具/搜索提示
+	ConvID   string // 会话 ID（首个 SSE_ACK 给出）
+	// AgentID 是工作模式的 agent 实例 id（STREAM_MSG_NOTIFY 首帧给出）。
+	//
+	// 工具通道（fetch_agent_miss）必须带它，且只在会话存活期内有效。
+	AgentID   string
 	ErrorCode int
 	ErrorMsg  string
 	Done      bool

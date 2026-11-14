@@ -500,8 +500,36 @@ ext: { use_deep_think: "10001" }
   命令执行默认关闭且仅允许白名单可执行文件（不经过 shell）。
   单测覆盖越界、软链、超限、超时与白名单。
 
-**尚未完成**：把三路并发编排进网关（`RunWorkTurn`），以及在真实会话里
-抓一次完整的 `fetch_agent_miss` 工具调用报文（需要沙箱在流进行中注册成功）。
+**已落地编排**：`internal/workturn` —— 流 + 轮询 + 执行 + 回传，`cmd/probe -workturn`
+可直接跑一次回合。`sandbox_info_report` 的 `info` 字段已按客户端
+`init_env_succeeded`（entry-moa @2139038）对齐：
+
+```js
+{ agent_workspace: <工作区>, project_directory: <项目目录>,
+  local_skill_paths: [], available: true }
+```
+
+`fetch_agent_miss` 也按客户端真实调用修正：`limit=100`，`begin_seq` 未设置时
+**整个字段省略**（不是传 0）。
+
+**仍然卡住的一步（关键）**：实测第一次轮询就返回 `{expired: true, msgs: []}`，
+即使 agent_id 刚拿到、沙箱刚上报成功。也就是说上游**没有把本机当成工具投递目标**。
+客户端侧对应代码还有一道门控：
+
+```js
+if ("dispatcher" !== cQ()) return Tf("multi_env_transport_lifecycle",
+  { stage: "init", status: "skipped", reason: "delivery_disabled" });
+```
+
+即投递循环只在客户端处于 `dispatcher` 模式时才启动。结合此前 `client_option`
+里沙箱 id 是本地 `nativeInstanceId` 的事实，推断还缺一步：**聊天请求要带上
+client_option（camelCase 形态：`client_env_id` / `sandbox_env_id` / `sandbox_id` /
+`sandbox_auth_type` / `os` / `workspace` / `shared_folder_path` / `enable_sandbox`）**，
+上游才会为该 agent 建立工具投递通道。
+
+实测记录：模型在无工具通道时会**声称已完成**（如"已创建 hello.txt"），
+而工作区里什么都没有 —— 因此不能用模型的自然语言判断工具是否执行，
+必须看 `tools` 计数与工作区落盘结果。
 安全提醒：`run_command` 一旦开启，等于把模型输出接到本机进程，必须保持白名单
 与工作区约束，切勿在共享/生产环境直接开到最大。
 

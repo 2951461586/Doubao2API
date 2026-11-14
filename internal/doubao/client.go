@@ -358,7 +358,19 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 		option["conversation_mode"] = workModeConversationMode
 		option["mode_id"] = modeID
 		option["need_deep_think"] = workModeDeepThink
+		// 工作模式要求 answer_with_suggest=false（普通对话我们保持 true 以拿思维链）。
+		option["answer_with_suggest"] = false
 		ext["use_deep_think"] = strconv.Itoa(workModeDeepThink)
+
+		// 普通对话会把 reasoning_effort / mode_id 塞进 model_config 与
+		// aggregate_params；工作模式带这两个键会被判 710020202（实测）。
+		if m, ok := option["model_config"].(map[string]any); ok {
+			delete(m, "reasoning_effort")
+		}
+		if m, ok := option["aggregate_params"].(map[string]any); ok {
+			delete(m, "reasoning_effort")
+			delete(m, "mode_id")
+		}
 
 		// model_item_key 与 reasoning_effort 必须在三处保持一致（实测要求）。
 		if req.ModelItemKey != "" {
@@ -369,10 +381,12 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 					option[k] = m
 				}
 				m["model_item_key"] = req.ModelItemKey
-				// reasoning_effort 只在 conversation_init_ext 里下发（手工验证通过的组合）；
-				// model_config / aggregate_params 里带它会被判 common invalid param。
+				// reasoning_effort / mode_id 只在 conversation_init_ext 里下发
+				//（手工验证通过的组合）；放到 model_config / aggregate_params 会被判
+				// common invalid param。
 				if k == "conversation_init_ext" {
 					m["reasoning_effort"] = firstNonEmpty(req.ReasoningEffort, workModeDefaultEffort)
+					m["mode_id"] = modeID
 				}
 			}
 		}
