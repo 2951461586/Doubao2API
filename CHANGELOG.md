@@ -8,11 +8,13 @@
 
 ### Added
 
-- 项目 Logo：复用豆包客户端的 `Logo.png`（`assets/logo.png`），README 采用
-  「居中 Logo + 标题 + 徽章」版式（CI / Release / Go / 零依赖 / 许可证 / API / 平台）。
-- 控制台 favicon：由客户端图标生成 16/32/48 三尺寸 ICO（2 KB）内嵌并由
-  `GET /favicon.ico` 提供（`public, max-age=86400`，仅 GET/HEAD），页面 head 加
-  `rel="icon"` 与 `apple-touch-icon`。
+- 项目 Logo：从豆包客户端图标 `DoubaoWork/icon.ico` 取出原生 256×256 帧作为
+  `assets/logo.png`；README 采用「居中 Logo + 标题 + 徽章」版式
+  （CI / Release / Go / 零依赖 / 许可证 / API / 平台）。
+- 控制台 favicon：同样取自 `DoubaoWork/icon.ico` 的 16/32/48 **原生帧**（不重新缩放，
+  小尺寸更清晰），组装为 10 KB 的三帧 ICO 内嵌，由 `GET /favicon.ico` 提供
+  （`public, max-age=86400`，仅 GET/HEAD），页面 head 加 `rel="icon"` 与
+  `apple-touch-icon`。
 - `.markdownlint.yaml`：放行版式必需的内联 HTML（MD033 白名单）、关闭
   MD041/MD013 并说明理由，其余规则保持默认。
 - `.github/workflows/release.yml`：推送 `v*` tag 即自动发布 —— 校验 CHANGELOG 小节、
