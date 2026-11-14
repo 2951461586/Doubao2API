@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +62,10 @@ func TestResolveRejectsEscape(t *testing.T) {
 		"a/../../outside.txt",
 		"a\\..\\..\\outside.txt",
 		"/etc/passwd",
-		`C:\Windows\win.ini`,
-		"C:relative.txt",
+	}
+	// 盘符路径只在 Windows 上是「绝对路径」；Linux 下 `C:relative.txt` 只是普通文件名。
+	if runtime.GOOS == "windows" {
+		bad = append(bad, `C:\Windows\win.ini`, "C:relative.txt")
 	}
 	for _, p := range bad {
 		if _, err := s.Resolve(p); !errors.Is(err, ErrPathEscape) {
