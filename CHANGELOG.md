@@ -55,6 +55,14 @@
 
 ### Changed
 
+- `option.support_lazy_fetch_stream` 改为可选（`ChatRequest.SupportLazyFetchStream`
+  与 `cmd/probe -lazy`）。A/B 实测同一长回复提示词：关闭 27.7s/160 块/1155 字，
+  开启 25.2s/151 块/1084 字，两者都正常结束、无截断，差异属生成长度波动 ——
+  该开关对本项目路径无明显收益，保持默认关闭。
+- `cmd/probe` 新增 `-dump`：只打印将要发送的请求体，便于协议对照。
+- 工作 / 智能体模式：按参考项目 README 的字段表实现后，上游仍返回
+  `710020202 common invalid param`（6 轮组合均失败），已**回滚**实现；
+  取证结论（字段表 + 可用模型 `model_item_key` 清单）记录在 `docs/recon.md` §6.12。
 - 控制台：`:focus-visible` 焦点环（键盘可达）、切页回到顶部、启动时少发一次
   `/admin/api/state`（`init` 与 `showTab` 重复请求）。
 - 协议取证更新（见 `docs/recon.md` §6.0）：147 版 `biz.pak` 只存编译产物，

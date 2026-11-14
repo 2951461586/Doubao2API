@@ -185,6 +185,11 @@ type ChatRequest struct {
 	ReasoningEffort string
 	// SelectedSkills 对应 ext.mention_skill_list（提及技能）。
 	SelectedSkills []string
+	// SupportLazyFetchStream 对应 option.support_lazy_fetch_stream。
+	//
+	// 参考项目 yyydsz/doubao2api 置 true；我们的实测（见 docs/recon.md §6.12）表明
+	// 它对短回复没有影响，默认关闭、按需开启。
+	SupportLazyFetchStream bool
 	// Ext 是调用方显式透传的 ext 字段（高级用法）。
 	Ext map[string]any
 	// 多模态附件

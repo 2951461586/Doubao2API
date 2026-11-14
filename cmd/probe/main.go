@@ -68,6 +68,8 @@ func main() {
 	conv := flag.String("conv", "", "conversation_id（配合 -chat，用于多轮）")
 	inSkill := flag.String("inputskill", "", "ext.input_skill（技能入参 JSON，配合 -chat）")
 	base := flag.String("base", doubao.UpstreamBase, "上游 host（如 https://accounts.doubao.com）")
+	lazy := flag.Bool("lazy", false, "option.support_lazy_fetch_stream=true（A/B 用）")
+	dump := flag.Bool("dump", false, "只打印将要发送的请求体（不请求上游），便于对照协议")
 	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
 	maxOut := flag.Int("max", 200000, "JSON 打印上限（字节，0 = 不截断）")
 	flag.Parse()
@@ -111,7 +113,15 @@ func main() {
 		defer cancel()
 		n, ncr := 0, 0
 		var txt strings.Builder
-		err := c.ChatStream(ctx, a, doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill}, func(ch doubao.CompletionChunk) error {
+		req := doubao.ChatRequest{Text: *chat, ThinkLevel: *think, SkillID: *skill, SupportLazyFetchStream: *lazy}
+		if *dump {
+			payload := doubao.BuildPayload(a, req)
+			out, _ := json.MarshalIndent(payload, "", "  ")
+			os.Stdout.Write(out)
+			fmt.Println()
+			return
+		}
+		err := c.ChatStream(ctx, a, req, func(ch doubao.CompletionChunk) error {
 			n++
 			txt.WriteString(ch.Text)
 			if ch.ErrorCode != 0 {

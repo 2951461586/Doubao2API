@@ -301,6 +301,9 @@ func BuildPayload(a *Account, req ChatRequest) map[string]any {
 	if req.AgentMode > 0 {
 		option["agent_mode"] = req.AgentMode
 	}
+	if req.SupportLazyFetchStream {
+		option["support_lazy_fetch_stream"] = true
+	}
 
 	// conversation_init_ext / model_config / aggregate_params 是新版客户端的
 	// 模型选择 + 推理强度参数；仅在调用方显式传入时下发，且不发送空键

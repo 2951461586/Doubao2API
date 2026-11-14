@@ -357,6 +357,46 @@ Web 端走 `POST /samantha/chat/completion`；网关用 `POST /chat/completion`
 - SSE 解析（`block_type` / `content_block` / `is_finish`）在 Web 端 bundle 里，
   桌面容器层不含这些字段。
 
+#### 工作 / 智能体模式（未完成，已回滚实现）
+
+参考项目 README 给出了工作模式的实测字段表与可用模型清单，摘录如下（供后续对齐）：
+
+| 字段 | 值 |
+| --- | --- |
+| `option.agent_mode` | `1` |
+| `option.conversation_mode` | `2` |
+| `option.mode_id` / `option.mode_name` | `"3"` / `工作任务` |
+| `option.model_config` / `aggregate_params` / `conversation_init_ext` 的 `model_item_key` | 三处必须一致 |
+| `option.conversation_init_ext.reasoning_effort` | `"0"`–`"4"` |
+| `option.sse_recv_event_options.support_chunk_delta` | `true` |
+| `enable_sandbox` | headless 场景必须 `false`（沙箱在客户端本地） |
+
+工作模式可用模型（`model_item_key`，参考项目逐个实测）：
+
+| 对外名 | model_item_key | 备注 |
+| --- | --- | --- |
+| `auto` | `9` | 免费 |
+| `doubao-2.1-lite` | `seed-lite-7b` | 256k |
+| `doubao-2.1-pro` | `5` | 256k |
+| `deepseek-v4-flash` | `person-deepseek-v4-1-flash-261017` | **默认** |
+| `deepseek-v4-pro` | `person-deepseek-v4-pro-ga-260813` | |
+| `kimi-k3` | `person-kimi-k3-261111` | |
+| `kimi-k3.1-pro` | `person-kimi-k3-1-pro-261111` | |
+| `kimi-k3.1-pro-fast` | `person-kimi-k3-1-pro-highspeed-261111` | |
+| `glm-5.3` / `glm-5.3-flash` | `person-glm-5-3-261111` / `…-flash-261111` | 上游报错话术，疑未开通 |
+
+> 清单来源是**客户端缓存** `_DesktopActionBarBriefListRequestCacheDataV1` 里的
+> `modeSelectData.menuConfV2.mode_list`，不是接口下发 —— 这也解释了为什么
+> `/v1/models` 里没有 DeepSeek / Kimi：它们是**工作模式**的模型，普通对话不存在这些型号。
+
+**本项目的尝试与结论**：按上述字段（含 `agent_mode=1`、`conversation_mode=2`、
+`mode_id`、三处一致的 `model_item_key`、`enable_sandbox=false`、最小 option 字段集）
+构造请求，上游仍返回 `710020202 common invalid param`；试过 6 轮组合均失败，
+已**回滚**工作模式实现，避免留下"看似支持、实际不可用"的路径。
+
+下一步需要：抓一次真实客户端工作模式的请求体（或解析缓存里的 `mode_list` /
+`general_task_param` 实际结构）再补实现。
+
 ### 6.11 积分、签到与任务奖励
 
 豆包有「积分（credits）」和「额度（quota）」两个概念：
