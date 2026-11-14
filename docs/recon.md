@@ -444,6 +444,35 @@ curl -X POST http://127.0.0.1:10086/admin/api/settings -H 'Content-Type: applica
 
 ---
 
+### 6.12 与参考项目 yyydsz/doubao2api 的协议对照
+
+对照 [yyydsz/doubao2api](https://github.com/yyydsz/doubao2api)（Go，约 3.2k 行，
+`internal/doubao` + `internal/config` 内置默认公参）。结论：**协议本体一致，
+无需按它更新**；差异集中在「产品线 / 客户端版本 / 功能范围」。
+
+| 维度 | 本项目（DoubaoWork 147） | 参考项目 | 结论 |
+| --- | --- | --- | --- |
+| 推理入口 | `POST /chat/completion` | 同 | 一致 |
+| `aid` / `real_aid` | `1044603`（工作端） | `582478`（主端，`local_app_id` 同） | 产品线不同，不改 |
+| `device_platform` | `web` + `doubao_device_platform=desktop` | `desktop` | 我们从 147 bundle 取证（`runtime ? "web" : …`），不改 |
+| 版本号 | `pc_version=2.36.15` / `runtime_version=3.45.5` | `2.30.1` / `3.37.4` | 他们对应更早的客户端 |
+| `chromium_version` / `version_code` | `147.0.7727.149` / `20800` | 同 | 一致 |
+| 请求头 | `Content-Type` + `Agw-Js-Conv: str` + `Accept: text/event-stream` + UA/Origin/Referer/Cookie/CSRF | 另加 `agw-js-conv: str, str`、`last-event-id: undefined`、`x-flow-trace: 04-…-01`、`Accept: */*` | 我们取自当前 bundle（`["Agw-Js-Conv","str"]`）；两边实测都能跑，不改 |
+| `need_deep_think` | `0/1/3`（快速/思考/专家，三档可映射） | `10001`（`ext.use_deep_think` 同值） | 实测两者上游都接受（`think=10001` 正常返回），保留我们的三档语义 |
+| `answer_with_suggest` | `true`（实测置 false 会丢思维链） | `false`（该项目不做思维链透出） | 保留 |
+| 请求体骨架 | `client_meta` + `messages[].content_block` + `option` + `ext` | 同 | 一致 |
+| 额外可选字段 | 无 | `client_meta.local_permissions`、`option.support_lazy_fetch_stream` / `is_old_user` / `message_storage_type` / `conversation_mode`、`user_context: []` | 未验证有收益，不盲加 |
+| Work / Agent 模式 | 未实现 | `agent_mode` + `general_task_param`（sandbox_id / workspace / `task_input_json` / `client_option`） | **功能缺口**，对应 roadmap 的「工具调用 / 异步长任务」 |
+| SSE 解析 | 块类型注册表，30 种 `block_type` | 仅 `10000` 文本 / `10040` 思考标题 | 我们更完整 |
+| 签到 | `daily_signin` 任务 + `pending` 语义 + 每小时复查队列 | 同一个 `landing/checkin`，把 `710010702` 映射成 `no_campaign` | 我们更完整；`scene` 填活动组码同样报错（已实测） |
+
+值得后续跟进的两点（都属新增能力，不是修 bug）：
+
+1. **`support_lazy_fetch_stream`**：参考项目在 `option` 里置 `true`，可能影响长回复的拉取方式；
+   可在一次长对话里 A/B 验证后再决定。
+2. **`a_bogus` 可选签名**：参考项目预留了该项（配置注入），默认不启用；
+   若哪天遇到风控类拒绝，可作为兜底手段。
+
 ## 项目结构
 
 > 以下为当前实际布局（`internal/` 下按职责拆分，单个文件不再超过 ~700 行）。
