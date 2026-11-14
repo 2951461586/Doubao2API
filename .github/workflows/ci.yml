@@ -21,7 +21,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # 本项目零第三方依赖、没有 go.sum；默认会因找不到依赖清单而缓存失败。
+          # 指定 go.mod 作为缓存键，既保留 Go 构建缓存又消除该告警。
           cache: true
+          cache-dependency-path: go.mod
 
       # go.mod 无 require，这一步是显式的「零依赖」守卫：
       # 一旦有人加了第三方依赖，构建阶段就需要联网，这里会先失败给出信号。
@@ -63,7 +66,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # 本项目零第三方依赖、没有 go.sum；默认会因找不到依赖清单而缓存失败。
+          # 指定 go.mod 作为缓存键，既保留 Go 构建缓存又消除该告警。
           cache: true
+          cache-dependency-path: go.mod
 
       - name: Build
         env:

@@ -19,6 +19,8 @@
   ELF 却命名为 `.exe`。现已固定 `GOOS=windows GOARCH=amd64`。
 - CI 中的 `actions/checkout`、`actions/setup-go` 固定到 commit SHA；发布链路关闭
   checkout 的凭据持久化（避免 token 落进 `.git/config`）。
+- CI 的 `setup-go` 缓存改用 `go.mod` 作为依赖键：本项目零第三方依赖、没有
+  `go.sum`，原先每次都报「Dependencies file is not found」并放弃缓存。
 
 ## [0.1.0] - 2026-11-14
 
