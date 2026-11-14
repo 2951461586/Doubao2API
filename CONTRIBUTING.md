@@ -48,6 +48,30 @@ python tools/extract_sources.py .recon/extract .recon/src --stats
 
 结论性发现请写进 `docs/recon.md`，并附上「怎么验证的」，方便下一个人复现。
 
+147 版起 `biz.pak` 只存编译产物，可读 JS 在
+`%LOCALAPPDATA%/DoubaoWork/User Data/gecko_cache/.../static/js` 与
+`<安装目录>/app/local_webcontents/apps/*/main.js`。两个取证脚本：
+
+```bash
+# 按关键字定位 pak 内的 blob（只导出命中的，避免解出 525 MB）
+python scripts/recon_pak_probe.py "<DoubaoWork>/app/local_webcontents/biz/biz.pak" /tmp/recon "samantha"
+
+# 打印 minified JS 里某个关键字前后的可读切片
+python scripts/recon_ctx.py "<安装目录>/app/local_webcontents/apps/entry-moa/main.js" doubao_device_platform
+```
+
+### 控制台改动
+
+控制台是单文件 `internal/server/web/index.html`，改动后建议跑一次真机回归：
+
+```bash
+./doubao2api -port 10195 -data /tmp/state.json -no-import &
+chrome --headless=new --remote-debugging-port=9223 --user-data-dir=/tmp/cdp about:blank &
+CDP_PORT=9223 PAGE_URL=http://127.0.0.1:10195/ node scripts/console-selftest.mjs
+```
+
+它会逐个点击侧栏按钮，断言面板切换、只有活跃面板可见、且没有控制台报错。
+
 ## 代码风格
 
 - 注释统一中文，解释**为什么**（尤其是「必须这样否则上游报错」的坑）。

@@ -275,6 +275,88 @@ GET /passport/safe/csrf_token/?aid=…&device_id=…
 - `GET /v1/conversations` → `/alice/conversation/list`；
   `PATCH/DELETE/POST .../pin|unpin|archive|clear` → `/alice/conversation/*`。
 
+### 6.0 2026-11 重新取证（147.0.7727.149）
+
+对当前安装的客户端重新取证，纠正/补充了若干结论。
+
+**取证路径变了**：147 版的 `biz.pak` 里只剩编译产物（JSON 元数据 + V8 code cache +
+ReactLynx 快照 + 一份 wasm），**不再有可读 JS**，也仍然没有 source map。
+真正的可读 JS 在另外两处：
+
+| 位置 | 内容 | 规模 |
+| --- | --- | --- |
+| `%LOCALAPPDATA%/DoubaoWork/User Data/gecko_cache/<id>/flow_web_entries/.../static/js` | 豆包 Web 端 bundle（SSE 解析、会话、技能都在这里） | 254 个 JS，最大 2.4 MB |
+| `<安装目录>/app/local_webcontents/apps/{entry-main,entry-moa,doubao-office}/main.js` | 桌面端容器层（公参、请求头、特性开关、本地工具） | 665 KB / 2.8 MB / 1.3 MB |
+
+命令：`python scripts/recon_pak_probe.py <pak> <out>` 按关键字定位 pak 内 blob；
+`python scripts/recon_ctx.py <bundle> <keyword>` 打印 minified JS 的可读切片。
+
+#### 公参（逐字，`entry-moa/main.js`）
+
+```js
+{ version_code: getParam("version_code"),                 // 20800
+  ...(hasParam("update_version_code") ? { update_version_code: ... } : {}),  // 新增（可选）
+  language, device_platform: runtime ? "web" : device_platform,
+  doubao_device_platform: device_platform,                 // desktop
+  aid, real_aid: aid, pkg_type, device_id,
+  pc_version, doubao_pc_version: pc_version,
+  web_id, tea_uuid: uuid,                                  // ← 独立 uuid，不是 device_id
+  region, sys_region: region, samantha_web: 1,
+  web_platform, "use-olympus-account": 1,
+  runtime, runtime_version, client_platform: "pc_client",
+  chromium_version, channel, fp: `verify_${device_id}` }
+```
+
+与网关 `SecurityParams` 的差异：网关**多**发 `iid` / `web_tab_id` / `msToken`
+（客户端公参里没有，服务端兼容），**少**发 `update_version_code`（本地无法取到该值，
+未发；服务端也不强制）。`tea_uuid` 网关沿用 `device_id`（客户端用一次性 uuid），
+实测不影响。
+
+#### 请求头（`createFetchStream` 调用处）
+
+```js
+headers: [["content-type","application/json"], ["Agw-Js-Conv","str"], ...getCommonHeaders()]
+```
+
+`getCommonHeaders` 在懒加载 chunk（模块 593234）里，未落在本地缓存；从调用点可确认
+聊天请求只有上面两个固定头 + 公共头（csrf / UA 等）。WebSocket 路径另有一套签名：
+`X-Bogus` / `X-MS-STUB`（`bdms.frontierSign`），**SSE 路径不需要**。
+
+#### 聊天入口
+
+Web 端走 `POST /samantha/chat/completion`；网关用 `POST /chat/completion`
+（同样被接受，生产已验证）。两条路径都在，保留网关现有实现。
+
+#### 模型列表
+
+客户端**没有静态模型清单**：模型相关能力全部来自服务端配置
+（特性开关 `moa_config.model_name`、`moa_config.enable_switch_model`、
+`moa_config.enable_new_choice`）。因此 `/v1/models` 里的「快速 / 思考 / 专家 + 技能」
+是**网关自己的抽象**，不是上游枚举 —— 文档里必须说清，避免误导。
+
+#### 工具调用
+
+当前客户端的"工具调用"是**本地沙箱工具**，结果回传上游：
+
+| 端点 | 关键字段 |
+| --- | --- |
+| `POST /alice/office/tool_local/upload_tool_call_result` | `sandbox_id` / `tool_result` / `device_id` |
+| `POST /alice/office/tool_local/upload_tool_call_result_v2` | 同上 |
+| `POST /alice/office/tool_local/upload_pre_build_sandbox_result` | 见 bundle |
+
+工具在客户端沙箱里执行，网关侧无法复现（没有沙箱环境）。上游返回的
+`block_type=10024`（通用工具块）网关已作为工具提示透传，行为保持不变。
+
+#### 已失效的旧结论
+
+- `need_deep_think`、`action_bar_skill_id`、`content_block` 在当前 147 客户端
+  **已不再出现**（0 命中）。网关仍发送这些字段：服务端继续兼容（思考档位、技能均实测有效），
+  但不要再把它们当作"当前客户端协议"引用。
+- 深度思考现在是 UI 特性开关（`deep_think_show` / `deep_think_memory`），
+  请求侧档位由服务端配置决定。
+- SSE 解析（`block_type` / `content_block` / `is_finish`）在 Web 端 bundle 里，
+  桌面容器层不含这些字段。
+
 ### 6.11 积分、签到与任务奖励
 
 豆包有「积分（credits）」和「额度（quota）」两个概念：

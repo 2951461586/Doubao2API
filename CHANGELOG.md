@@ -8,6 +8,10 @@
 
 ### Added
 
+- `scripts/console-selftest.mjs`：用 CDP 驱动无头 Chrome 逐个点击侧栏并断言切页，
+  作为控制台改动的回归手段（用法见 CONTRIBUTING）。
+- `scripts/recon_pak_probe.py`（按关键字定位 pak 内 blob）与
+  `scripts/recon_ctx.py`（打印 minified JS 的可读切片），供协议重新取证。
 - 项目 Logo：从豆包客户端图标 `DoubaoWork/icon.ico` 取出原生 256×256 帧作为
   `assets/logo.png`；README 采用「居中 Logo + 标题 + 徽章」版式
   （CI / Release / Go / 零依赖 / 许可证 / API / 平台）。
@@ -15,21 +19,37 @@
   小尺寸更清晰），组装为 10 KB 的三帧 ICO 内嵌，由 `GET /favicon.ico` 提供
   （`public, max-age=86400`，仅 GET/HEAD），页面 head 加 `rel="icon"` 与
   `apple-touch-icon`。
-- `.markdownlint.yaml`：放行版式必需的内联 HTML（MD033 白名单）、关闭
-  MD041/MD013 并说明理由，其余规则保持默认。
 - `.github/workflows/release.yml`：推送 `v*` tag 即自动发布 —— 校验 CHANGELOG 小节、
   跑 fmt / vet / `-race`、交叉构建三平台产物与 `SHA256SUMS`，然后建 Release
   （已存在则覆盖附件，兼容重跑）。
 - README 新增「下载预编译产物」入口（含各平台文件名与校验方式）。
+- `.markdownlint.yaml`：放行版式必需的内联 HTML（MD033 白名单），关闭
+  MD041/MD013 并写明理由，其余规则保持默认。
+
+### Changed
+
+- 控制台：`:focus-visible` 焦点环（键盘可达）、切页回到顶部、启动时少发一次
+  `/admin/api/state`（`init` 与 `showTab` 重复请求）。
+- 协议取证更新（见 `docs/recon.md` §6.0）：147 版 `biz.pak` 只存编译产物，
+  可读 JS 在 `gecko_cache` 与 `local_webcontents/apps`；公参新增可选的
+  `update_version_code`、`tea_uuid` 实为独立 uuid；聊天走
+  `/samantha/chat/completion`；客户端无静态模型清单（来自服务端 `moa_config`）；
+  工具调用是本地沙箱 + `/alice/office/tool_local/upload_tool_call_result(_v2)`；
+  `need_deep_think` / `action_bar_skill_id` 在当前客户端已不再出现。
 
 ### Fixed
 
+- **控制台侧栏按钮"点了没反应"**：样式表里缺少 `.tab` / `.tab.on` 规则，导致 8 个
+  `<section>` 页面全部堆叠显示（文档高 12614 px），点击导航只切换 class 而没有
+  视觉变化。补上 `display:none/block` 后，用无头 Chrome + CDP 逐个点击 8 个按钮
+  验证：面板正确切换、仅活跃面板可见、无控制台报错（页面高度 12614 → 1355）。
 - `make dist` 的 Windows 产物此前未显式指定 `GOOS`：在 Linux runner 上会产出
   ELF 却命名为 `.exe`。现已固定 `GOOS=windows GOARCH=amd64`。
 - CI 中的 `actions/checkout`、`actions/setup-go` 固定到 commit SHA；发布链路关闭
   checkout 的凭据持久化（避免 token 落进 `.git/config`）。
 - CI 的 `setup-go` 缓存改用 `go.mod` 作为依赖键：本项目零第三方依赖、没有
   `go.sum`，原先每次都报「Dependencies file is not found」并放弃缓存。
+
 
 ## [0.1.0] - 2026-11-14
 
