@@ -1024,7 +1024,8 @@ func TestMetaAndAutosave(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	s.StartAutosave(ctx, 10*time.Millisecond)
+	stop := s.StartAutosave(ctx, 10*time.Millisecond)
+	defer stop()
 	s.UpsertAccount(testAccount("a1", "s1")) // 标记 dirty
 	// 等到自动保存把文件写出来。
 	deadline := time.Now().Add(2 * time.Second)

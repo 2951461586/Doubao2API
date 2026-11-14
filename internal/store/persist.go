@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -236,13 +237,16 @@ func (s *Store) MarkDirty() { s.dirty.Store(true) }
 
 // StartAutosave 启动合并落盘：有变更才写，且最多每 interval 写一次。
 //
-// 请求级的账号失败计数、调用统计、密钥用量以前只在进程正常退出时保存，
-// 容器被强停 / 主机断电就丢了。
-func (s *Store) StartAutosave(ctx context.Context, interval time.Duration) {
+// 返回的 stop 会取消内部上下文并等待后台 goroutine 退出（含最后一次 flush）。
+// 测试里必须调用它，否则 goroutine 可能在 TempDir 清理时还在写文件。
+func (s *Store) StartAutosave(ctx context.Context, interval time.Duration) (stop func()) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -255,6 +259,14 @@ func (s *Store) StartAutosave(ctx context.Context, interval time.Duration) {
 			}
 		}
 	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
 }
 
 // flush 在有变更时落盘。
