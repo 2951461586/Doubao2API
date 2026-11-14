@@ -207,7 +207,7 @@
         </div>
         <div class="panel">
           <div class="panel-head"><h2>账号列表</h2><div class="actions"><span id="accountsMeta" class="muted mono"></span></div></div>
-          <div class="table-wrap"><table><thead><tr><th>名称</th><th>来源</th><th>会话</th><th>状态</th><th>设备</th><th>最近签到</th><th>失败</th><th>最近使用</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>来源</th><th>会话</th><th>状态</th><th>设备</th><th>最近签到</th><th>待确认签到</th><th>失败</th><th>最近使用</th><th>操作</th></tr></thead><tbody id="accounts"></tbody></table></div>
         </div>
       </section>
 
@@ -237,6 +237,7 @@
           <div class="actions">
             <button class="btn" id="refreshRewards">刷新</button>
             <button class="btn primary" id="doCheckin">每日签到</button>
+            <button class="btn" id="retryCheckin" title="对「确认中」的签到立刻复查一次（需在设置中开启复查）">催办签到</button>
           </div></div>
         <div class="cards" id="rewardKpis"></div>
         <div class="panel"><div class="panel-head"><h2>积分</h2><div class="actions"><button class="btn sm" id="loadHistory">积分流水</button></div></div>
@@ -297,6 +298,7 @@
             <label class="row" style="margin:0"><input type="checkbox" id="sAutoCheckin"> 每日自动签到</label>
             <label class="row" style="margin:0"><input type="checkbox" id="sAutoClaim"> 自动领取已完成奖励</label>
             <label class="row" style="margin:0"><input type="checkbox" id="sAutoTasks"> 自动尝试做任务</label>
+            <label class="row" style="margin:0"><input type="checkbox" id="sRetryCheckin"> 待确认签到每小时复查</label>
             <div><label style="margin:0">每日任务上限</label><input id="sTaskLimit" type="number" min="0" max="10" class="w-120"></div>
           </div>
           <div class="hint">自动执行默认关闭。开启后后台每 30 分钟检查一次：签到按天幂等；任务只使用上游推荐提示词，失败会记录并跳过；完成后自动清空并归档会话。</div>
@@ -463,7 +465,8 @@
       ["PC / Runtime", (up.pc_version || "—") + " / " + (up.runtime_version || "—")],
       ["自动签到", st.auto_checkin ? "开启" : "关闭"],
       ["自动领取", st.auto_claim_tasks ? "开启" : "关闭"],
-      ["自动做任务", st.auto_do_tasks ? ("开启 · 上限 " + (st.auto_task_limit||0)) : "关闭"]
+      ["自动做任务", st.auto_do_tasks ? ("开启 · 上限 " + (st.auto_task_limit||0)) : "关闭"],
+      ["签到复查", st.retry_pending_checkin ? "开启（每小时）" : "关闭"]
     ];
     kv.forEach(function(p){
       body.appendChild(el("div", "k", p[0]));
@@ -487,7 +490,7 @@
   function renderAccounts(d){
     var tb = $("#accounts"); tb.textContent = "";
     var accts = d.accounts || [];
-    if (!accts.length) { tb.appendChild(emptyRow(9, "暂无账号，点击「导入本机桌面端」或手工录入")); return; }
+    if (!accts.length) { tb.appendChild(emptyRow(10, "暂无账号，点击「导入本机桌面端」或手工录入")); return; }
     accts.forEach(function(a){
       var st = el("td"); st.appendChild(statusPill(a));
       var ops = el("td");
@@ -502,11 +505,28 @@
       var r = row([
         cell(a.name), cell(a.source || "—", "muted"), cell(a.session || "—", "mono"), st,
         cell(a.device_id || "—", "mono"), cell(a.last_checkin_date || "—", "mono"),
+        pendingCheckinCell(a),
         cell(a.failures || 0, "mono"), cell(fmtTime(a.last_used), "muted"), ops
       ]);
       if (a.last_err) r.title = a.last_err;
       tb.appendChild(r);
     });
+  }
+  // pendingCheckinCell 渲染「待确认签到」列。
+  //
+  // 上游把签到奖励做成异步发放（biz_code=3），此时账号侧会留下
+  // pending_checkin_* 记录，由后台复查队列每小时重试一次。
+  function pendingCheckinCell(a){
+    var td = el("td");
+    if (!a.pending_checkin_date && !a.pending_checkin_at) {
+      td.className = "muted"; td.textContent = "—"; return td;
+    }
+    var tries = a.pending_checkin_tries || 0;
+    td.appendChild(pill("确认中 · " + tries + " 次", "warn"));
+    td.title = "待确认日期：" + (a.pending_checkin_date || "—") +
+      "\n最近尝试：" + fmtTime(a.pending_checkin_at) +
+      "\n开启「待确认签到每小时复查」后会自动补写签到结果";
+    return td;
   }
   function renderKeys(d){
     var tb = $("#keys"); tb.textContent = "";
@@ -533,6 +553,7 @@
     $("#sAutoCheckin").checked = !!st.auto_checkin;
     $("#sAutoClaim").checked = !!st.auto_claim_tasks;
     $("#sAutoTasks").checked = !!st.auto_do_tasks;
+    $("#sRetryCheckin").checked = !!st.retry_pending_checkin;
     $("#sTaskLimit").value = st.auto_task_limit || 0;
   }
 
@@ -567,7 +588,9 @@
     var kp = $("#rewardKpis"); kp.textContent = "";
     [
       ["积分余额", fmtNum(credit.total_credit_num || 0), credit.credit_desc_text || "可用于付费能力"],
-      ["今日签到", last.last_checkin_date || "—", last.last_reward ? ("+" + last.last_reward + " 额度") : "未签到"],
+      ["今日签到", last.last_checkin_date || "—",
+        last.pending_checkin ? ("确认中 · 已试 " + (last.pending_checkin.attempts || 0) + " 次")
+          : (last.last_reward ? ("+" + last.last_reward + " 额度") : "未签到")],
       ["可选任务", (c.optional_tasks||[]).length, "每日登录等"],
       ["自动任务", (S.state && S.state.settings && S.state.settings.auto_do_tasks) ? "开启" : "关闭", "设置中可开关"]
     ].forEach(function(k){
@@ -650,9 +673,29 @@
     var b = $("#doCheckin"); b.disabled = true;
     api("/v1/checkin", {method:"POST", body:{}}).then(function(d){
       var r = d.result || {};
-      toast("签到成功：+" + (r.reward_amount || 0) + " 额度（连续 " + (r.continuous_days || 0) + " 天）", "ok");
+      if (r.pending) {
+        // 上游已受理、奖励异步确认中：此时不能当成功也不能当失败。
+        toast("签到已提交，上游确认中。\n已登记到复查队列；在设置里开启「待确认签到每小时复查」后会自动补写结果。", "");
+      } else if (r.checked_in) {
+        toast("签到成功：+" + (r.reward_amount || 0) + " 额度（连续 " + (r.continuous_days || 0) + " 天）", "ok");
+      } else {
+        toast("签到未完成：上游未确认（可稍后重试）", "");
+      }
       loadRewards(); loadState();
     }).catch(function(e){ toast("签到失败：" + e.message, "err"); }).then(function(){ b.disabled = false; });
+  }
+  function retryCheckin(){
+    var b = $("#retryCheckin"); b.disabled = true;
+    api("/admin/api/checkin/retry", {method:"POST", body:{}}).then(function(d){
+      if (!d.enabled) {
+        toast("复查队列未开启：请先在「设置」里打开「待确认签到每小时复查」", "err");
+        return;
+      }
+      var n = d.remain_count || 0;
+      toast(n ? ("复查完成：" + n + " 个账号仍在上游确认中") : "复查完成：没有待确认的签到", n ? "" : "ok");
+      loadState(); loadRewards();
+    }).catch(function(e){ toast("复查失败：" + e.message, "err"); })
+      .then(function(){ b.disabled = false; });
   }
   function claimTask(t){
     api("/v1/tasks/claim", {method:"POST", body:{
@@ -821,6 +864,7 @@
       auto_checkin: $("#sAutoCheckin").checked,
       auto_claim_tasks: $("#sAutoClaim").checked,
       auto_do_tasks: $("#sAutoTasks").checked,
+      retry_pending_checkin: $("#sRetryCheckin").checked,
       auto_task_limit: parseInt($("#sTaskLimit").value,10) || 0
     };
     var p = $("#sPw").value.trim(); if (p) body.admin_password = p;
@@ -886,6 +930,7 @@
     $("#refreshSkills").onclick = loadSkills;
     $("#refreshRewards").onclick = loadRewards;
     $("#doCheckin").onclick = doCheckin;
+    $("#retryCheckin").onclick = retryCheckin;
     $("#claimCompleted").onclick = claimCompleted;
     $("#runTasks").onclick = runTasks;
     $("#loadHistory").onclick = loadHistory;

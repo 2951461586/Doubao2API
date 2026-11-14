@@ -56,6 +56,10 @@
 - 新增 `POST /admin/api/checkin/retry` 手动催办；`/admin/api/state` 与
   `/v1/checkin` 的 `account` 字段会带出 `pending_checkin` 详情。
 - 自动签到（`auto_checkin`）会跳过已登记进重试队列的账号，避免重复请求上游。
+- 控制台：设置页新增「待确认签到每小时复查」开关；账号列表新增「待确认签到」列
+  （脱敏展示 `确认中 · N 次`，悬浮可见日期与最近尝试时间）；积分页新增
+  「催办签到」按钮（调 `POST /admin/api/checkin/retry`）；「今日签到」KPI 在
+  确认中时显示已试次数，签到结果区分「成功 / 确认中 / 未完成」。
 
 ### Added
 
