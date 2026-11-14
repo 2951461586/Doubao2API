@@ -394,8 +394,41 @@ Web 端走 `POST /samantha/chat/completion`；网关用 `POST /chat/completion`
 构造请求，上游仍返回 `710020202 common invalid param`；试过 6 轮组合均失败，
 已**回滚**工作模式实现，避免留下"看似支持、实际不可用"的路径。
 
-下一步需要：抓一次真实客户端工作模式的请求体（或解析缓存里的 `mode_list` /
-`general_task_param` 实际结构）再补实现。
+#### 真正的阻塞点：沙箱实例必须由上游预创建（已从 bundle 取证）
+
+在 `entry-moa/main.js`（@1934394）找到客户端的 sandbox client option 构造：
+
+```js
+let d = {
+  client_env_id:     a,                 // 来自沙箱创建结果
+  enable_sandbox:    true,
+  os:                e.detectClientOs(),
+  ...(c ? { preinstall_skill_path: c } : {}),
+  sandbox_auth_type: o,
+  sandbox_env_id:    r.envId,           // ← 上游下发
+  sandbox_id:        i.instanceId,      // ← 上游下发
+  shared_folder_path: i.resolvedSharedFolders,
+  workspace:          l,
+};
+// 随后 clientOptionJson: JSON.stringify(d)
+```
+
+同一处还有 `create_sandbox_instance_failed` / `preBuildSandboxKey` / `instanceId`，
+说明客户端是**先调沙箱创建接口**拿到 `instanceId` 与 `envId`，再把它们塞进聊天请求。
+我们用 `sandbox-<uuid>` 自造这两个 id，正是被 `710020202 common invalid param` 拒绝的原因。
+
+由此可以下一个明确结论：
+
+- **工作模式的工具调用无法在 headless 网关里复现** —— 工具在客户端本机沙箱执行
+  （`computer_use_tool` / `cua` / `preinstall_skill_path`），网关既没有沙箱运行时，
+  也拿不到合法的沙箱实例 id。
+- 字段名层面还有一处需要注意：客户端用的是 `client_env_id` / `sandbox_env_id`
+  这类键，而参考项目的 `agent_task_param` / `task_input_json` / `conversation_mode`
+  在当前 147 bundle 里 **0 命中** —— 那些是它按旧版或自行重构的写法，不能照抄。
+
+若要继续，唯一的可靠路径是：**抓一次真实客户端工作模式的完整请求体**
+（桌面端切「工作任务」发一条消息 + mitmproxy/Fiddler），或先逆出沙箱创建接口
+（`create_sandbox_instance` 一类）再决定是否值得做。
 
 ### 6.11 积分、签到与任务奖励
 
