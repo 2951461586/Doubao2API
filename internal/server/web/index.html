@@ -36,6 +36,12 @@
   .nav button:hover{background:var(--panel2);color:var(--fg)}
   .nav button.on{background:var(--panel2);border-color:var(--line);color:var(--fg)}
   .nav .ico{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--faint);font-size:14px}
+  /* 侧边栏角标：待确认签到数量（warn 色），0 时整体隐藏 */
+  .nav button .count{margin-left:auto;min-width:18px;height:18px;padding:0 6px;border-radius:999px;display:inline-flex;
+    align-items:center;justify-content:center;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;
+    background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn);
+    border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .nav button .count[hidden]{display:none}
   .nav button.on .ico{color:var(--accent)}
   .side-foot{margin-top:auto;padding:12px 8px 4px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
   .side-meta{font-size:11px;color:var(--faint)}
@@ -130,7 +136,7 @@
     </div>
     <nav class="nav" id="nav">
       <button data-tab="overview" class="on"><span class="ico">▦</span>概览</button>
-      <button data-tab="accounts"><span class="ico">◉</span>账号池</button>
+      <button data-tab="accounts"><span class="ico">◉</span>账号池<span class="count" id="navPendingCheckin" hidden></span></button>
       <button data-tab="keys"><span class="ico">⚿</span>密钥</button>
       <button data-tab="models"><span class="ico">✦</span>模型与技能</button>
       <button data-tab="rewards"><span class="ico">◎</span>积分与任务</button>
@@ -413,6 +419,7 @@
       renderModels(d.models || []);
       renderSettings(d.settings || {});
       $("#accountsMeta").textContent = (d.accounts||[]).length + " 个账号";
+      updatePendingBadge(d.accounts || []);
       $("#modelsMeta").textContent = (d.models||[]).length + " 个模型";
     }).catch(function(e){ toast("状态加载失败：" + e.message, "err"); });
   }
@@ -486,6 +493,18 @@
         ]));
       });
     });
+  }
+  // updatePendingBadge 把「待确认签到」数量同步到侧边栏角标。
+  //
+  // 角标只做提醒：数量为 0 时隐藏；具体哪几个账号在账号池的「待确认签到」列里。
+  function updatePendingBadge(accts){
+    var n = (accts||[]).filter(function(a){ return a.pending_checkin_date || a.pending_checkin_at; }).length;
+    var b = $("#navPendingCheckin");
+    if (!b) return;
+    b.hidden = n === 0;
+    b.textContent = n > 99 ? "99+" : String(n);
+    b.title = n ? (n + " 个账号的签到待上游确认。" +
+      "在「设置」里开启「待确认签到每小时复查」后会自动补写；也可在积分页点「催办签到」立即复查。") : "";
   }
   function renderAccounts(d){
     var tb = $("#accounts"); tb.textContent = "";
@@ -877,6 +896,19 @@
     api("/admin/api/stats", {method:"DELETE"}).then(function(){ toast("统计已重置", "ok"); loadState(); loadLogs(); })
       .catch(function(e){ toast("重置失败：" + e.message, "err"); });
   }
+  // startPendingBadgePoll 独立轮询「待确认签到」数量。
+  //
+  // 后台的复查队列每小时一次，角标若只跟着当前页签刷新就会长期停留在旧值。
+  // 这里只拉状态并更新角标，**不重绘**表单与表格：避免打断正在编辑的设置项。
+  function startPendingBadgePoll(){
+    setInterval(function(){
+      if (document.hidden) return; // 后台页签不打扰上游
+      api("/admin/api/state").then(function(d){
+        S.state = d;
+        updatePendingBadge(d.accounts || []);
+      }).catch(function(){});
+    }, 60000);
+  }
   function startQr(){
     api("/admin/api/login/qrcode", {method:"POST", body:{}}).then(function(d){
       $("#qrPanel").style.display = "";
@@ -949,6 +981,7 @@
     $("#clearStats").onclick = clearStats;
 
     loadHealth(); loadState(); loadMeta();
+    startPendingBadgePoll();
     showTab("overview");
   }
   init();
