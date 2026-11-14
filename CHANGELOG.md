@@ -38,8 +38,11 @@
 - **工作模式编排**：新增 `internal/workturn`（流 + 工具轮询 + 沙箱执行 + 结果回传），
   `cmd/probe -workturn <目录>` 可直接跑一次回合并 `-raw` 打印原始 agent 报文。
   实测：`agent_id` 获取、沙箱上报、轮询、正文汇总均正常；但第一次轮询即返回
-  `{expired:true}`，上游未向本机投递工具调用（客户端侧该通道受
-  `cQ()==="dispatcher"` 门控），故**工具执行链路尚未打通**。
+  `{expired:true}`，上游未向本机投递工具调用。
+  根因已定位到服务端 AB 开关：客户端仅当
+  `enable_multi_env_client === "1"` 时才启用 dispatcher 投递循环，否则走 `sse`；
+  该账号的 `/alice/user/config/pull` 对所有相关对象都返回 `configs: null`，
+  即未命中实验。故**工具执行链路在本账号上不可完成**（非协议字段问题）。
 - **工具执行端（沙箱运行时）**：新增 `internal/agent` —— 工作区受限的本地执行端，
   支持 `write_file` / `read_file` / `list_dir` / `run_command`；强制路径包含
   （拒绝绝对路径、盘符、`..` 与软链接逃逸）、读写与输出字节上限、命令默认关闭

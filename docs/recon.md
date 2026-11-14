@@ -530,6 +530,30 @@ client_option（camelCase 形态：`client_env_id` / `sandbox_env_id` / `sandbox
 实测记录：模型在无工具通道时会**声称已完成**（如"已创建 hello.txt"），
 而工作区里什么都没有 —— 因此不能用模型的自然语言判断工具是否执行，
 必须看 `tools` 计数与工作区落盘结果。
+
+#### 阻断的最终定位：服务端 AB 开关 `enable_multi_env_client`
+
+客户端里工具投递循环的开关是一行 AB 判定（entry-moa @1038262）：
+
+```js
+cQ = () => "1" === getFeatureFlag("enable_multi_env_client",
+        { source: serverAB, defaultValue: "0" }) ? "dispatcher" : "sse";
+```
+
+- `dispatcher`：启动工具投递循环（`fetch_agent_miss` + 执行 + 回传）；
+- `sse`：**不启动**，此时即使聊天走 agent_mode，本机也不会收到工具调用。
+
+对应实测：`fetch_agent_miss` 第一次轮询就返回 `{expired: true, msgs: []}`；
+`/alice/user/config/pull` 对 `enable_multi_env_client` / `moa_config` / `ab_config`
+等对象一律返回 `{"configs": null}` —— 即该账号没有被下发（或未参与）这个实验。
+
+**因此这不是协议字段问题，而是服务端实验分配**：除非账号被纳入
+`enable_multi_env_client=1` 的实验组，任何客户端都拿不到工具调用，网关更不可能
+靠改 payload 拿到。之前推断的「把 client_option 塞进 general_task_param」已证伪：
+`client_option` 在 bundle 里只用于 `upload_prebuild_sandbox_result`，**不在聊天请求体中**。
+
+结论：工具执行全链路**在本账号上不可完成**；要验证只能找一个命中该实验的账号，
+或继续逆 AB 的解析/下发路径（`FGStore` 的 `serverAB` 源，来自 tcc / 服务端接口）。
 安全提醒：`run_command` 一旦开启，等于把模型输出接到本机进程，必须保持白名单
 与工作区约束，切勿在共享/生产环境直接开到最大。
 
