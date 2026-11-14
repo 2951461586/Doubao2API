@@ -468,6 +468,43 @@ ext: { use_deep_think: "10001" }
 > 若真要实现，注意安全边界：模型可以要求在"沙箱"里执行任意命令/读写文件，
 > 网关侧实现等于把 RCE 暴露给模型输出，必须配合白名单/容器隔离，不能直接跑在本机。
 
+#### 工具执行链路（客户端 API 已打通，编排未完成）
+
+客户端工具通道（`entry-moa/main.js` 的 `OfficeToolLocalhubFacadeService`）实测结果：
+
+| 端点 | 请求体 | 实测 |
+| --- | --- | --- |
+| `POST /alice/office/tool_local/sandbox_info_report` | `{protocol_version:"v1.0.0", agent_id, info}` | ✅ code 0（`info` 可为 `{}`） |
+| `POST /alice/office/tool_local/msg/fetch_agent_miss` | `{agent_id, agent_type, begin_seq, limit}` | ✅ code 0；**`agent_type` 必须传字符串**（传数字报 `InvalidRequest`）；会话过期返回 `{expired:true, msgs:[]}` |
+| `POST /alice/office/tool_local/msg/ack` | `{msg_ids: []}` | 待工具调用实链路验证 |
+| `POST /alice/office/tool_local/msg/complete` | `{msg_id}` | 同上 |
+| `POST /alice/office/tool_local/upload_tool_call_result(_v2)` | `{sandbox_id, tool_result, device_id}` | 同上 |
+
+关键事实：
+
+- **工具调用不走 SSE**：`STREAM_CHUNK` 里只有文本/思考/耗时块；
+  工具调用由服务端排进 agent 队列，客户端用 `msg/fetch_agent_miss` 长轮询取。
+- `agent_id` 来自 SSE 的 `STREAM_MSG_NOTIFY` 首帧（实测形如 `38576177346174978`）。
+- **沙箱实例 id 是客户端本地生成的**（bundle 里叫 `nativeInstanceId`），
+  不是服务端签发 —— 之前的判断需要修正；但必须先用 `sandbox_info_report`
+  注册给服务端，模型才会认为"这台机器有工具"。
+- 因此完整链路必须是**三路并发**：SSE 流（拿 agent_id / 正文）+ 轮询（取工具调用）
+  + 执行并回传。只在流结束后再轮询会拿到 `expired: true`（实测）。
+
+本仓库已落地的部分：
+
+- `internal/doubao/tool_local.go`：上述 5 个端点的客户端封装（含 v2→v1 回退）。
+- `internal/agent/sandbox.go`：工作区受限的本地执行端 ——
+  `write_file` / `read_file` / `list_dir` / `run_command`，强制路径包含
+  （拒绝绝对路径、盘符、`..` 与**软链接逃逸**）、读写与输出字节上限、
+  命令执行默认关闭且仅允许白名单可执行文件（不经过 shell）。
+  单测覆盖越界、软链、超限、超时与白名单。
+
+**尚未完成**：把三路并发编排进网关（`RunWorkTurn`），以及在真实会话里
+抓一次完整的 `fetch_agent_miss` 工具调用报文（需要沙箱在流进行中注册成功）。
+安全提醒：`run_command` 一旦开启，等于把模型输出接到本机进程，必须保持白名单
++ 工作区约束，切勿在共享/生产环境直接开到最大。
+
 ### 6.11 积分、签到与任务奖励
 
 豆包有「积分（credits）」和「额度（quota）」两个概念：

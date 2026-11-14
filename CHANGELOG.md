@@ -35,6 +35,14 @@
 
 ### Added
 
+- **工具执行端（沙箱运行时）**：新增 `internal/agent` —— 工作区受限的本地执行端，
+  支持 `write_file` / `read_file` / `list_dir` / `run_command`；强制路径包含
+  （拒绝绝对路径、盘符、`..` 与软链接逃逸）、读写与输出字节上限、命令默认关闭
+  且仅白名单可执行文件、不经过 shell。含 12 个单测（越界/软链/超限/超时/白名单）。
+- **工具通道客户端**：新增 `internal/doubao/tool_local.go` —— 封装
+  `sandbox_info_report`、`msg/fetch_agent_miss`、`msg/ack`、`msg/complete`、
+  `upload_tool_call_result(_v2)`。实测：沙箱上报 code 0；`agent_type` 必须传字符串；
+  会话过期返回 `{expired:true}`（故编排必须与 SSE 流并发）。
 - **工作模式（agent_mode=1）模型**：`/v1/models` 新增 `deepseek-v4-flash`
   （默认档）、`deepseek-v4-pro`、`kimi-k3`、`kimi-k3.1-pro`、`doubao-2.1-pro`，
   并带出上游 `model_item_key` 与 `agent_mode` 字段；别名 `deepseek` / `kimi` /
