@@ -30,4 +30,8 @@ MD033:
     - th
     - td
 MD041: false
+# CHANGELOG 里 [Unreleased] 与各版本小节都会出现 ### Added / ### Fixed，
+# 这是 Keep a Changelog 的正常写法，因此只校验「同一父级下」的重复标题。
+MD024:
+  siblings_only: true
 MD013: false
