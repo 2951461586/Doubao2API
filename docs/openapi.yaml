@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Doubao2API
-  version: "0.1.0"
+  version: "0.1.2"
   description: |
     把本机豆包（DoubaoWork）桌面端的上游服务复刻成 OpenAI 兼容的 Go 网关。
 

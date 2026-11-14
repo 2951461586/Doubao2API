@@ -1,58 +1,72 @@
 # 进度与后续
 
-> 已完成项按阶段归档；未完成项即后续计划。
+> 已发布版本见 [CHANGELOG](../CHANGELOG.md)。本节只记「做到了什么」与「还没做什么」，
+> 实现细节见 [recon.md](recon.md)，接口见 [api.md](api.md)。
 
-## 当前进度与后续
+## 版本
 
-### 已完成（第二阶段：协议对齐 + 能力扩充）
+| 版本 | 日期 | 主题 |
+| --- | --- | --- |
+| v0.1.2 | 2026-11-14 | 控制台侧栏修复、协议重新取证、发布自动化、品牌资源 |
+| v0.1.0 | 2026-11-14 | 首个正式版本（网关 + 控制台 + 文档） |
 
-- [x] `biz.pak` v5 格式兼容（哨兵结束 / field2 非条目数），拆包脚本可重跑
-- [x] 公参 / 请求头对齐 147 客户端：`aid=1044603`、`doubao_device_platform`、
-      `pc_version=2.36.15`、`runtime_version=3.45.5`、`channel=win`、
-      `fp=verify_<device_id>`、`iid`、`Agw-Js-Conv: str`、`tz_name`
-- [x] CSRF token 自动刷新（`/passport/safe/csrf_token/`，去掉 `real_aid`）+ 30 分钟缓存 + 鉴权失败重试
-- [x] 旧账号指纹自动迁移（随机 `fp` → `verify_<device_id>`，补齐 `web_tab_id`）
-- [x] 新块类型解析：搜索来源 / 代码 / 生图 / 产物 / 链接引用 / 音乐成品
-- [x] 结构化输出：`sources[]` / `artifacts[]` / `music[]` / `images[]`
-- [x] 技能清单与技能模型（13 个技能模型，自动套用 `default_prompt`）
-- [x] `reasoning_effort` → `need_deep_think` 映射
-- [x] `agent_mode` / `model_item_key` / `mode_id` / `selection_mode` / `selected_skills` / `ext` 透传
-- [x] `/v1/skills`、`/v1/conversations`（列表 / 重命名 / 归档 / 置顶 / 清空）、`/v1/capabilities`
-- [x] `/v1/music/lyrics`（lyrics_web / lyrics，实测可用）
-- [x] 积分 / 签到 / 任务奖励：`/v1/credits`、`/v1/checkin`、`/v1/tasks`、
-      `/v1/tasks/claim`、`/v1/tasks/claim-completed`
-- [x] 每日自动签到 / 自动领取已完成奖励（`auto_checkin` / `auto_claim_tasks`，默认关闭）
-- [x] 自动尝试做任务（`auto_do_tasks` / `auto_task_limit`）+ 会话清空归档 + 临时文件清理
-- [x] 控制台全面改版：侧边栏、深浅色、概览 / 账号 / 密钥 / 模型与技能 /
-      积分与任务 / 会话 / 日志 / 设置，覆盖全部后端模块
+## 已完成
 
-### 第一阶段（精简网关）
+### 协议与网关
 
-- [x] 桌面端凭据自动导入（DPAPI + AES-GCM + 域名前缀），支持多 profile 批量导入
-- [x] 上游协议复刻（公参、请求体、SSE 补丁流）
-- [x] `/v1/chat/completions`（流式 / 非流式）+ `/v1/models`
-- [x] 三档模式与思维链 → `reasoning_content`
-- [x] 多轮会话（压平历史 + `conversation_id` 原生续接）
-- [x] 账号池轮询与有界重试
-- [x] 控制台 API（账号 / 密钥 / 日志 / 统计 / 设置），带管理鉴权与 CSRF 防护
-- [x] Docker 一键部署（多阶段构建、非 root、健康检查）
-- [x] 控制台单页（内嵌 HTML 面板，无外部依赖）
-- [x] Anthropic `/v1/messages` 双向转换（含 `thinking` 块与图片）
-- [x] 图片理解：`block_type=10052` 上传链路（`/alice/resource/prepare_upload` + imageX 直传）
-- [x] 文件解析（PDF / Office / 文本，附件 `type=3`）
-- [x] 文生图（`/v1/images/generations`，基于图像生成技能 `skill_type=3`）
-- [x] 文生视频（`/v1/videos/generations`，基于创意画布 `canvas_type=50`，已实测）
-- [x] 扫码登录（passport SSO，`/admin/api/login/qrcode`）
-- [x] 技能透传（聊天接口 `skill` / `input_skill` 字段）
-- [x] 音乐音频解析（`/v1/music/audio`，`video_id` → 音频地址，已实测）
+- 桌面端登录态导入（DPAPI + AES-GCM + 域名前缀剥离，支持多 profile）
+- 公参 / 请求头 / SSE 补丁流复刻；CSRF 自动刷新 + 30 分钟缓存 + 鉴权失效重试
+- 三档思考（快速 / 思考 / 专家）→ `reasoning_content`；技能自动套用 `default_prompt`
+  （12 个技能模型）
+- 多轮：历史压平 + `conversation_id` 原生续接
+- 账号池轮询 + 有界重试（客户端断开立即停止）
+- 块类型注册表（30 种 `block_type`）：文本 / 思维链 / 搜索来源 / 代码 / 生图 / 产物 / 音乐
+- 结构化输出 `sources[]` / `artifacts[]` / `music[]` / `images[]`，流式与阻塞一致
 
-### 后续阶段
+### 端点
 
-- [ ] 文生音乐成品：`skill=9` 的聊天请求仍受账号配额 / 风控限制；
-      歌词（`/v1/music/lyrics`）与成品解析（`music[]` / `/v1/music/audio`）已闭环，
-      有配额的账号可直接出成品
-- [ ] 异步长任务：`/chat/async/chunk_stream` / `/samantha/chat/async/stream`
-      （新版客户端的 async task 协议，用于智能体 / 深度研究长任务）
-- [ ] 上游二进制流：`/alice/message/stream_reply`（protobuf），当前仍走 JSON SSE
+- OpenAI：`/v1/chat/completions`、`/v1/models`、`/v1/images/generations`
+- Anthropic：`/v1/messages`（含 thinking 块与图片）
+- 豆包原生：`/v1/videos/generations`、`/v1/music/lyrics`、`/v1/music/audio`、
+  `/v1/skills`、`/v1/capabilities`、`/v1/conversations*`
+- 积分：`/v1/credits*`、`/v1/checkin`、`/v1/tasks*`（含 `pending` 语义与后台复查队列）
 
----
+### 控制台与运维
+
+- 单页控制台（内嵌、零外部资源、深浅色、favicon、侧栏角标）
+- 扫码登录、手工 Cookie、多 profile 导入、逐账号探活
+- 鉴权：密钥 / 管理密码 / 无密钥仅本机 / 写操作同源校验 / CORS 收紧 / 恒定时间比较
+- Docker 部署、`Makefile`、CI（fmt / vet / race / build / docker）、
+  推 tag 自动发布（构建三平台产物 + `SHA256SUMS` + 建 Release）
+
+### 工程质量
+
+- 覆盖率：`registry` 96%、`account` 95%、`store` 93%、`server` 33%、`doubao` 22%
+- 协议夹具回归：`internal/doubao/testdata/*.sse`（10 份事件序列）
+- 控制台点击回归：`scripts/console-selftest.mjs`（CDP 驱动无头 Chrome）
+- 文档：`api` / `recon` / `security` / `roadmap` / `openapi.yaml` +
+  `SECURITY.md` / `CONTRIBUTING.md` / `CHANGELOG.md`
+
+## 后续
+
+### 阻塞在上游
+
+- [ ] **签到动作**：`/alice/ug/campaign/landing/checkin` 已废弃，任务停在
+      `in_progress`，领取恒返回 `biz_code=3`（确认中）。网关如实返回 `pending`，
+      `retry_pending_checkin` 开启后每小时复查，上游恢复即自动补写
+- [ ] **积分活动**：部分环境（如部署机出口 IP）`/v1/tasks` 返回
+      `campaign not found`；同一账号在本机直连正常，判断为环境级差异
+- [ ] **文生音乐成品**：`skill=9` 受会员配额门禁（`710022004 rate limited`）；
+      歌词与成品解析已闭环，有配额的账号可直接出成品
+
+### 待实现
+
+- [ ] **工具调用**：当前客户端是「本地沙箱执行 + 结果回传」
+      （`/alice/office/tool_local/upload_tool_call_result(_v2)`），网关没有沙箱环境；
+      要支持 OpenAI `tools` 语义需先解决沙箱执行面与结果格式
+- [ ] 异步长任务：`/chat/async/chunk_stream`、`/samantha/chat/async/stream`
+- [ ] 上游二进制流 `/alice/message/stream_reply`（protobuf），当前仍走 JSON SSE
+- [ ] SSE 里非 JSON 的 `data:` 事件目前静默跳过：加计数并暴露到 `/health`，
+      避免协议漂移时表现为「回答空白」而无告警
+- [ ] 密钥哈希存储 + 管理接口失败限流（需改控制台交互）
+- [ ] `server` 包覆盖率：用假上游补 `/v1/chat/*` 编排逻辑的测试

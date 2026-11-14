@@ -497,8 +497,18 @@ doubao2api/
 ├── tools/extract_pak.py           # biz.pak 解包脚本（第一步，可重跑）
 ├── tools/extract_sources.py       # source map → 源码还原脚本（第二步，可重跑）
 ├── docs/                          # 本文档目录（recon / api / security / roadmap / openapi.yaml）
-├── Makefile                       # 常用任务：build / test / race / cover / docker
-├── .github/workflows/ci.yml       # CI：fmt / vet / race / build / docker
+├── scripts/
+│   ├── fmt-check.sh               # gofmt 校验（CI 与 make check 共用）
+│   ├── release.sh                 # 打 annotated tag（校验 CHANGELOG 小节 + make check）
+│   ├── console-selftest.mjs       # 控制台点击回归（CDP 驱动无头 Chrome）
+│   ├── recon_pak_probe.py         # 按关键字定位 pak 内 blob
+│   └── recon_ctx.py               # 打印 minified JS 的可读切片
+├── Makefile                       # 常用任务：build / test / race / cover / dist / release / docker
+├── .github/workflows/
+│   ├── ci.yml                     # CI：fmt / vet / race / build / docker
+│   └── release.yml                # 推 v* tag 自动建 Release 并上传产物
+├── .markdownlint.yaml             # 文档 lint 白名单（居中徽章版式 / CHANGELOG 重复标题）
+├── .yamllint                      # YAML lint 配置（OpenAPI 紧凑流程映射）
 ├── doubao2api-data.example.json   # 脱敏状态文件样例
 └── go.mod                         # 无 require，纯标准库
 ```

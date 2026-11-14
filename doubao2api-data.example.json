@@ -34,7 +34,10 @@
       "note": "",
       "last_used": 0,
       "last_err": "",
-      "failures": 0
+      "failures": 0,
+      "pending_checkin_date": "",
+      "pending_checkin_at": 0,
+      "pending_checkin_tries": 0
     }
   ],
   "keys": [
@@ -60,7 +63,8 @@
     "auto_claim_tasks": false,
     "auto_do_tasks": false,
     "auto_task_limit": 3,
-    "allow_anonymous": false
+    "allow_anonymous": false,
+    "retry_pending_checkin": false
   },
   "stats": {
     "total_requests": 0,

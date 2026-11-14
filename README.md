@@ -19,7 +19,7 @@
 
 <p align="center">
   复用桌面端已登录的会话凭据，无需另申请密钥；纯 Go 标准库实现，单文件约 10 MB，零第三方依赖。<br>
-  当前版本 <b>v0.1.0</b> ·
+  当前版本 <b>v0.1.2</b> ·
   <a href="https://github.com/2951461586/Doubao2API/releases/latest">下载预编译产物</a> ·
   <a href="CHANGELOG.md">更新日志</a> ·
   <a href="docs/api.md">接口文档</a>

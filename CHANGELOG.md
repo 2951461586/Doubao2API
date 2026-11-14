@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+（无）
+
+## [0.1.2] - 2026-11-14
+
 ### Added
 
 - `scripts/console-selftest.mjs`：用 CDP 驱动无头 Chrome 逐个点击侧栏并断言切页，
