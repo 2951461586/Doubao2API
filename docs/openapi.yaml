@@ -1,0 +1,1116 @@
+openapi: 3.1.0
+info:
+  title: Doubao2API
+  version: "0.9.0"
+  description: |
+    把本机豆包（DoubaoWork）桌面端的上游服务复刻成 OpenAI 兼容的 Go 网关。
+
+    - **推理面** `/v1/*`：OpenAI / Anthropic 兼容，外加豆包原生扩展字段。
+    - **控制面** `/admin/api/*`：控制台使用，需管理鉴权 + 同源校验（写操作）。
+    - **鉴权**：`Authorization: Bearer sk-...` 或 `x-api-key: sk-...`。
+      未签发密钥时「无密钥模式」仅放行本机环回来源（除非开启 `allow_anonymous`）。
+
+    错误统一为 `{"error": {"message": ..., "type": ..., "code": ...}}`。
+    上游失败一律映射为 HTTP 502 + `type=upstream_error`。
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://127.0.0.1:10086
+    description: 默认本机监听地址
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: inference
+    description: OpenAI / Anthropic 兼容推理接口
+  - name: capabilities
+    description: 能力自发现与对话侧数据
+  - name: rewards
+    description: 积分、签到与任务奖励
+  - name: admin
+    description: 控制台 API（管理鉴权）
+  - name: health
+    description: 探活
+
+paths:
+  /ping:
+    get:
+      tags: [health]
+      summary: 极简探活
+      security: []
+      responses:
+        "200":
+          description: 固定返回 `pong`
+          content:
+            text/plain:
+              schema: { type: string, example: pong }
+
+  /health:
+    get:
+      tags: [health]
+      summary: 健康检查
+      security: []
+      responses:
+        "200":
+          description: 网关与账号池状态（不暴露凭据）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  accounts: { type: integer, description: 账号总数 }
+                  ready: { type: integer, description: 状态为 ok 且启用的账号数 }
+                  models: { type: integer, description: 内置模型数 }
+
+  /v1/models:
+    get:
+      tags: [capabilities]
+      summary: 模型清单
+      description: 内置模型 + 技能模型 + 自定义别名（按名字排序，顺序稳定）。
+      responses:
+        "200":
+          description: 模型列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+
+  /v1/chat/completions:
+    post:
+      tags: [inference]
+      summary: OpenAI Chat Completions（豆包扩展字段可选）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChatRequest" }
+      responses:
+        "200":
+          description: |
+            `stream=false` 返回单个 completion；`stream=true` 返回 SSE 流
+            （`data: {...}` 增量，末尾 `data: [DONE]`，会话 ID 以 SSE 注释回传）。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChatCompletion" }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  OpenAI 风格 chunk。`delta` 中可能出现豆包扩展字段：
+                  `reasoning_content`（思维链）、`images`、`sources`、`artifacts`、`music`。
+                  会话 ID 通过注释行 `: conversation_id=<id>` 下发。
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/messages:
+    post:
+      tags: [inference]
+      summary: Anthropic Messages 兼容
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AnthropicRequest" }
+      responses:
+        "200":
+          description: |
+            `stream=false` 返回 Anthropic `message` 对象；
+            `stream=true` 返回 Anthropic SSE 事件
+            （`message_start` / `content_block_*` / `message_delta` / `message_stop`）。
+          content:
+            application/json:
+              schema: { type: object }
+            text/event-stream:
+              schema: { type: string }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/images/generations:
+    post:
+      tags: [inference]
+      summary: 文生图（OpenAI Images 兼容）
+      description: 内部走「图像生成」技能，上游以 creation_block 回传图片。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ImageRequest" }
+      responses:
+        "200":
+          description: 生成的图片（数量受 `n` 限制，最多 4）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        url: { type: string, format: uri }
+                        b64_json: { type: string }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/videos/generations:
+    post:
+      tags: [inference]
+      summary: 文生视频（创意画布）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VideoRequest" }
+      responses:
+        "200":
+          description: 生成结果（同步等待，超时下限 15 分钟）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        url: { type: string, format: uri }
+                        vid: { type: string }
+                        duration: { type: number }
+                        width: { type: integer }
+                        height: { type: integer }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/music/lyrics:
+    post:
+      tags: [inference]
+      summary: 生成歌词
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LyricsRequest" }
+      responses:
+        "200":
+          description: 歌词行
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  prompt: { type: string }
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index: { type: integer }
+                        text: { type: string }
+
+  /v1/music/audio:
+    post:
+      tags: [inference]
+      summary: 用音乐消息的 video_id 换取音频地址
+      description: |
+        网关不代生成音乐（上游把音乐技能放在会员配额门禁后，固定返回 710022004），
+        `video_id` 需从聊天流的 `music` 字段取得。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [video_id]
+              properties:
+                video_id: { type: string }
+      responses:
+        "200":
+          description: 音频地址
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  created: { type: integer }
+                  video_id: { type: string }
+                  url: { type: string, format: uri }
+
+  /v1/skills:
+    get:
+      tags: [capabilities]
+      summary: 上游技能清单
+      description: 合并本地技能元数据与 `/samantha/skill/list` 的结果。
+      responses:
+        "200":
+          description: 技能列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Skill" }
+                  input_skill_types: { type: array, items: { type: integer } }
+                  sidebar_skill_types: { type: array, items: { type: integer } }
+                  hide_in_lp: { type: array, items: { type: integer } }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/capabilities:
+    get:
+      tags: [capabilities]
+      summary: 能力自发现（模型 / 技能 / 端点 / 奖励开关）
+      responses:
+        "200":
+          description: 能力描述
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: capabilities }
+                  upstream:
+                    type: object
+                    properties:
+                      app_id: { type: string }
+                      version_code: { type: string }
+                      pc_version: { type: string }
+                      runtime_version: { type: string }
+                      chromium: { type: string }
+                  models:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+                  skills:
+                    type: array
+                    items: { $ref: "#/components/schemas/Skill" }
+                  rewards:
+                    type: object
+                    properties:
+                      campaign_group: { type: string }
+                      auto_checkin: { type: boolean }
+                      auto_claim: { type: boolean }
+                      auto_do_tasks: { type: boolean }
+                      auto_task_limit: { type: integer }
+                  endpoints: { type: array, items: { type: string } }
+
+  /v1/conversations:
+    get:
+      tags: [capabilities]
+      summary: 会话列表
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 50 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: types
+          in: query
+          description: 逗号分隔的会话类型
+          schema: { type: string, example: "3" }
+        - $ref: "#/components/parameters/AccountID"
+      responses:
+        "200":
+          description: 一页会话
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: list }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Conversation" }
+                  has_more: { type: boolean }
+                  offset: { type: integer }
+                  limit: { type: integer }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/conversations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [capabilities]
+      summary: 重命名会话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200": { description: 已重命名 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    delete:
+      tags: [capabilities]
+      summary: 归档会话
+      responses:
+        "200": { description: 已归档 }
+    post:
+      tags: [capabilities]
+      summary: 会话动作（默认归档）
+      description: 路径后缀支持 `pin` / `unpin` / `archive` / `clear`。
+      responses:
+        "200": { description: 动作已执行 }
+
+  /v1/credits:
+    get:
+      tags: [rewards]
+      summary: 积分余额与可选任务
+      parameters:
+        - name: tasks
+          in: query
+          description: 传 `false` 可省略任务列表
+          schema: { type: string, default: "true" }
+        - $ref: "#/components/parameters/AccountID"
+      responses:
+        "200":
+          description: 积分摘要
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: credit }
+                  credit: { $ref: "#/components/schemas/Credit" }
+                  optional_tasks: { type: array, items: { type: object } }
+                  credit_rule_link: { type: object }
+                  account_last_checkin: { $ref: "#/components/schemas/CheckinState" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/credits/history:
+    get:
+      tags: [rewards]
+      summary: 积分流水
+      parameters:
+        - name: size
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+        - name: cursor
+          in: query
+          description: 首屏不要传（0 会被上游判为非法参数）
+          schema: { type: integer }
+        - name: type
+          in: query
+          schema: { type: string }
+        - $ref: "#/components/parameters/AccountID"
+      responses:
+        "200":
+          description: 流水
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: list }
+                  data: { type: array, items: { type: object } }
+                  next_cursor: { type: integer, format: int64 }
+                  has_more: { type: boolean }
+
+  /v1/checkin:
+    post:
+      tags: [rewards]
+      summary: 每日签到（按天幂等）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scene: { type: string, example: sidebar }
+                account_id: { type: string }
+      responses:
+        "200":
+          description: 签到结果（同时写入账号状态）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: checkin }
+                  result: { type: object }
+                  account: { $ref: "#/components/schemas/CheckinState" }
+        "502": { $ref: "#/components/responses/UpstreamError" }
+
+  /v1/tasks:
+    get:
+      tags: [rewards]
+      summary: 积分任务 / 里程碑
+      parameters:
+        - name: campaign_group_code
+          in: query
+          schema: { type: string, default: pc_incentive_task_mvp_v3 }
+        - $ref: "#/components/parameters/AccountID"
+      responses:
+        "200":
+          description: 任务详情
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, const: task_list }
+                  data: { type: object }
+
+  /v1/tasks/claim:
+    post:
+      tags: [rewards]
+      summary: 领取单个任务奖励
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [campaign_item_code]
+              properties:
+                task_id: { type: string }
+                campaign_group_code: { type: string }
+                campaign_item_code: { type: string }
+                account_id: { type: string }
+      responses:
+        "200":
+          description: 领取结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  result: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /v1/tasks/claim-completed:
+    post:
+      tags: [rewards]
+      summary: 批量领取「已完成 / 直接领取」奖励
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                campaign_group_code: { type: string }
+                account_id: { type: string }
+      responses:
+        "200":
+          description: 批量领取结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  claimed_count: { type: integer }
+                  results: { type: array, items: { $ref: "#/components/schemas/ClaimResult" } }
+                  detail: { type: object }
+
+  /v1/tasks/run:
+    post:
+      tags: [rewards]
+      summary: 尝试执行积分任务并领取奖励
+      description: 耗时较长（超时下限 15 分钟），执行后会清理任务临时文件。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_tasks: { type: integer, description: 缺省取控制台 auto_task_limit }
+                campaign_group_code: { type: string }
+                account_id: { type: string }
+      responses:
+        "200":
+          description: 执行结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  claimed_count: { type: integer }
+                  results: { type: array, items: { $ref: "#/components/schemas/ClaimResult" } }
+                  cleaned_temp_files: { type: integer }
+                  account: { $ref: "#/components/schemas/CheckinState" }
+
+  /admin/api/state:
+    get:
+      tags: [admin]
+      summary: 控制台初始状态（账号 / 密钥脱敏）
+      security:
+        - ApiKeyAuth: []
+        - AdminPassword: []
+      responses:
+        "200":
+          description: 全量状态
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts: { type: array, items: { $ref: "#/components/schemas/AdminAccount" } }
+                  keys: { type: array, items: { type: object } }
+                  models:
+                    type: array
+                    items: { $ref: "#/components/schemas/Model" }
+                  settings: { type: object }
+                  stats: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/api/accounts:
+    post:
+      tags: [admin]
+      summary: 账号操作
+      description: 写操作需同源（或命中 CORS 允许列表），用于阻断 CSRF。
+      security:
+        - AdminPassword: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [import, manual, remove, toggle, clear-errors]
+                id: { type: string }
+                dir: { type: string, description: action=import 时的数据目录 }
+                cookies: { type: string, description: action=manual 时的 Cookie 串 }
+                name: { type: string }
+                device_id: { type: string }
+                web_id: { type: string }
+                iid: { type: string }
+                app_id: { type: string }
+                channel: { type: string }
+      responses:
+        "200": { description: 操作结果 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /admin/api/keys:
+    get:
+      tags: [admin]
+      summary: 密钥列表（脱敏）
+      security:
+        - AdminPassword: []
+      responses:
+        "200": { description: 密钥列表 }
+    post:
+      tags: [admin]
+      summary: 创建密钥（完整值仅返回一次）
+      security:
+        - AdminPassword: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+      responses:
+        "200":
+          description: 新建的密钥
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  key: { type: string, example: sk-0123456789abcdef }
+    delete:
+      tags: [admin]
+      summary: 删除或启停密钥
+      security:
+        - AdminPassword: []
+      parameters:
+        - name: key
+          in: query
+          description: 完整密钥或脱敏值
+          schema: { type: string }
+        - name: toggle
+          in: query
+          description: 传值时表示启停而非删除
+          schema: { type: string }
+      responses:
+        "200": { description: 操作结果 }
+
+  /admin/api/settings:
+    get:
+      tags: [admin]
+      summary: 读取设置（管理密码不外泄）
+      security:
+        - AdminPassword: []
+      responses:
+        "200": { description: 设置快照 }
+    post:
+      tags: [admin]
+      summary: 更新设置（局部更新）
+      security:
+        - AdminPassword: []
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Settings" }
+      responses:
+        "200": { description: 更新后的设置 }
+
+  /admin/api/logs:
+    get:
+      tags: [admin]
+      summary: 请求日志
+      security:
+        - AdminPassword: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer }
+      responses:
+        "200": { description: 日志列表 }
+    delete:
+      tags: [admin]
+      summary: 清空日志
+      security:
+        - AdminPassword: []
+      responses:
+        "200": { description: 已清空 }
+
+  /admin/api/stats:
+    get:
+      tags: [admin]
+      summary: 累计统计
+      security:
+        - AdminPassword: []
+      responses:
+        "200": { description: 统计 }
+    delete:
+      tags: [admin]
+      summary: 重置统计
+      security:
+        - AdminPassword: []
+      responses:
+        "200": { description: 已重置 }
+
+  /admin/api/checkin:
+    post:
+      tags: [admin]
+      summary: 对账号做连通性探测
+      security:
+        - AdminPassword: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id: { type: string, description: 缺省探测全部账号 }
+      responses:
+        "200": { description: 每个账号的探测结果 }
+
+  /admin/api/login/qrcode:
+    post:
+      tags: [admin]
+      summary: 生成扫码登录二维码
+      security:
+        - AdminPassword: []
+      responses:
+        "200":
+          description: 二维码图片与登录会话 id
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  qrcode: { type: string, description: data URL }
+
+  /admin/api/login/qrcode/poll:
+    get:
+      tags: [admin]
+      summary: 轮询扫码登录状态
+      security:
+        - AdminPassword: []
+      parameters:
+        - name: id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: pending / scanned / confirmed / expired
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [pending, scanned, confirmed, expired] }
+                  id: { type: string }
+                  name: { type: string }
+                  new: { type: boolean }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: 控制台签发的 `sk-...` 密钥；也接受 `x-api-key` 头。
+    AdminPassword:
+      type: apiKey
+      in: header
+      name: X-Admin-Password
+      description: 控制台管理密码；未设置时管理接口仅允许本机访问。
+
+  parameters:
+    AccountID:
+      name: account_id
+      in: query
+      description: 指定账号；缺省按账号池轮询并自动换号重试
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: 缺少或无效的 API 密钥 / 管理密码
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: 无密钥模式下的非本机来源，或跨站写操作被拒绝
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    UpstreamError:
+      description: 上游失败或者全部账号不可用
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message: { type: string }
+            type: { type: string, example: upstream_error }
+            code: { type: integer, description: 与 HTTP 状态码一致 }
+
+    Model:
+      type: object
+      properties:
+        id: { type: string, example: doubao-think }
+        object: { type: string, const: model }
+        created: { type: integer }
+        owned_by: { type: string, example: doubao }
+        doubao:
+          type: object
+          description: 仅 /v1/models 返回
+          properties:
+            name: { type: string }
+            think_level: { type: integer, enum: [0, 1, 3] }
+            skill: { type: integer, description: action_bar_skill_id，0 表示无技能 }
+            context: { type: integer }
+            description: { type: string }
+
+    Skill:
+      type: object
+      properties:
+        skill_type: { type: integer }
+        name: { type: string }
+        short_name: { type: string }
+        aliases: { type: array, items: { type: string } }
+        description: { type: string }
+        default_prompt: { type: string }
+        model: { type: string, description: 触发该技能的内置模型 ID }
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [system, developer, user, assistant, tool] }
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                description: |
+                  支持 `text` / `input_text`、`image_url` / `input_image`、
+                  `file` / `input_file`（`file_data` 接受 data URL 或裸 base64）。
+                properties:
+                  type: { type: string }
+                  text: { type: string }
+                  image_url:
+                    oneOf:
+                      - type: string
+                      - type: object
+                        properties:
+                          url: { type: string }
+                  file:
+                    type: object
+                    properties:
+                      filename: { type: string }
+                      file_data: { type: string }
+
+    ChatRequest:
+      type: object
+      required: [model, messages]
+      properties:
+        model: { type: string, example: doubao-think }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ChatMessage" }
+        stream: { type: boolean, default: false }
+        conversation_id:
+          type: string
+          description: 豆包原生多轮；缺省时由网关新建并在响应里返回
+        bot_id: { type: string }
+        skill:
+          oneOf:
+            - type: string
+            - type: integer
+          description: 本网关扩展；技能名 / 别名 / 数值，等价于 action_bar_skill_id
+        input_skill:
+          type: string
+          description: 透传到上游 `ext.input_skill`（技能入参 JSON 字符串）
+        reasoning_effort:
+          type: string
+          enum: [none, minimal, low, medium, high, xhigh, max]
+          description: 映射到 need_deep_think 档位
+        agent_mode: { type: integer }
+        model_item_key: { type: string }
+        mode_id: { type: string }
+        selection_mode: { type: boolean }
+        selected_skills: { type: array, items: { type: string } }
+        ext:
+          type: object
+          description: 直接并入上游 `ext`（高级用法，覆盖同名默认值）
+        doubao:
+          type: object
+          description: 上述扩展字段的嵌套写法（与本层等价，本层优先）
+          properties:
+            reasoning_effort: { type: string }
+            agent_mode: { type: integer }
+            model_item_key: { type: string }
+            mode_id: { type: string }
+            selection_mode: { type: boolean }
+            selected_skills: { type: array, items: { type: string } }
+            ext: { type: object }
+
+    ChatCompletion:
+      type: object
+      properties:
+        id: { type: string, example: chatcmpl-0123456789ab }
+        object: { type: string, const: chat.completion }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              message:
+                type: object
+                properties:
+                  role: { type: string, const: assistant }
+                  content: { type: string }
+                  reasoning_content: { type: string, description: 思考模式的思维链 }
+              finish_reason: { type: string, example: stop }
+        usage:
+          type: object
+          description: 豆包不返回 token 数，这里是按字符数的粗略估算
+          properties:
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+        conversation_id: { type: string }
+        images: { type: array, items: { type: string, format: uri } }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/SearchSource" }
+        artifacts: { type: array, items: { type: object } }
+        music: { type: array, items: { type: object } }
+
+    SearchSource:
+      type: object
+      properties:
+        title: { type: string }
+        url: { type: string, format: uri }
+        snippet: { type: string }
+        site: { type: string }
+
+    AnthropicRequest:
+      type: object
+      required: [model, max_tokens, messages]
+      properties:
+        model: { type: string }
+        max_tokens: { type: integer }
+        system:
+          oneOf:
+            - type: string
+            - type: array
+              items: { type: object }
+        messages:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { type: string, enum: [user, assistant] }
+              content:
+                oneOf:
+                  - type: string
+                  - type: array
+                    items: { type: object }
+        stream: { type: boolean }
+        temperature: { type: number }
+        top_p: { type: number }
+        stop_sequences: { type: array, items: { type: string } }
+        tools: { type: array, items: { type: object } }
+        tool_choice: { type: object }
+
+    ImageRequest:
+      type: object
+      required: [prompt]
+      properties:
+        model: { type: string, default: doubao-draw }
+        prompt: { type: string }
+        n: { type: integer, default: 1, maximum: 4 }
+        size:
+          type: string
+          description: 映射为上游支持的宽高比（如 1792x1024、16:9）
+        response_format: { type: string, enum: [url, b64_json], default: url }
+        style: { type: string, description: 覆盖默认的画幅 / 风格槽位 }
+
+    VideoRequest:
+      type: object
+      required: [prompt]
+      properties:
+        model: { type: string }
+        prompt: { type: string }
+        duration: { type: integer, description: 秒；缺省由上游决定 }
+        ratio: { type: string, example: "16:9" }
+
+    LyricsRequest:
+      type: object
+      properties:
+        prompt: { type: string }
+        theme: { type: string }
+        genre: { type: string }
+        mood: { type: string }
+        lyric: { type: string }
+      description: "`prompt` / `theme` / `lyric` 至少填一个"
+
+    Conversation:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        bot_id: { type: string }
+        last_section_id: { type: string }
+        conversation_type: { type: integer }
+        update_time: { type: integer, format: int64 }
+        pinned: { type: boolean }
+        icon_url: { type: string }
+        message_index: { type: integer }
+
+    Credit:
+      type: object
+      properties:
+        total_credit_num: { type: integer, format: int64 }
+        credit_text: { type: string }
+        credit_desc_text: { type: string }
+        icon_url: { type: string }
+        dark_mode_icon_url: { type: string }
+
+    CheckinState:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        last_checkin_date: { type: string, format: date }
+        last_checkin_at: { type: integer, format: int64 }
+        last_reward: { type: integer, format: int64 }
+
+    ClaimResult:
+      type: object
+      properties:
+        campaign_code: { type: string }
+        task_id: { type: string }
+        status: { type: string, enum: [claimed, skipped, failed] }
+        reason: { type: string }
+
+    AdminAccount:
+      type: object
+      description: 控制台账号视图（Cookie 与 token 不下发，只给脱敏标识）
+      properties:
+        id: { type: string }
+        name: { type: string }
+        source: { type: string }
+        session: { type: string, description: 脱敏后的 sessionid }
+        enabled: { type: boolean }
+        status: { type: string }
+        note: { type: string }
+        last_err: { type: string }
+        failures: { type: integer }
+        last_used: { type: integer, format: int64 }
+        device_id: { type: string }
+        cookie_count: { type: integer }
+        iid: { type: string }
+        channel: { type: string }
+        app_version: { type: string }
+        web_tab_id: { type: string }
+        last_checkin_date: { type: string }
+        last_checkin_at: { type: integer, format: int64 }
+        last_checkin_reward: { type: integer, format: int64 }
+        last_task_date: { type: string }
+        last_task_count: { type: integer }
+
+    Settings:
+      type: object
+      properties:
+        model_aliases:
+          type: object
+          additionalProperties: { type: string }
+          description: 别名 → 内置模型 ID（支持别名链）
+        request_timeout_sec: { type: integer, default: 300 }
+        max_retries: { type: integer, default: 3 }
+        log_keep: { type: integer, default: 500 }
+        cors_origin:
+          type: string
+          description: 逗号分隔的允许来源；空表示仅本机，不接受通配符
+        admin_password: { type: string, description: 空字符串表示取消管理密码 }
+        auto_checkin: { type: boolean, default: false }
+        auto_claim_tasks: { type: boolean, default: false }
+        auto_do_tasks: { type: boolean, default: false }
+        auto_task_limit: { type: integer, default: 3 }
+        allow_anonymous:
+          type: boolean
+          default: false
+          description: 无密钥时是否放行非本机来源（放开前先读 docs/security.md）
+        admin_password_set: { type: boolean, description: 只读，表示是否已设置密码 }

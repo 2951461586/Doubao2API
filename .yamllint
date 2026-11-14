@@ -1,0 +1,25 @@
+# yamllint 配置
+#
+# 本仓库的 YAML 只有两类：
+#   - docs/openapi.yaml：用紧凑流程映射（`{ type: string }`）保持接口可读性
+#   - .github/workflows/*.yml：GitHub Actions
+# 这两类都不适合 default 规则的「花括号内不能有空格」，因此在此显式放宽，
+# 其余规则（缩进、重复键、非法值等）保持开启。
+extends: default
+
+rules:
+  braces:
+    min-spaces-inside: 1
+    max-spaces-inside: 1
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+  # OpenAPI 的 description 经常写到 100 列以上，中文注释换行反而更难读。
+  line-length:
+    max: 120
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false", "on", "off", "yes", "no"]
+    check-keys: false

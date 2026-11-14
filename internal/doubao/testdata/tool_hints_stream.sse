@@ -1,0 +1,21 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"800"}}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10101,"block_id":"l1","content":{"loading_block":{"text_loading":{"text":"正在搜索…"}}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10024,"block_id":"g1","content":{"generic_tool_block":{"title":"调用浏览器"}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10019,"block_id":"f1","content":{"file_operation_block":{"title":"读取 report.pdf"}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10012,"block_id":"u1","content":{"image_block":{"summary":"图片里是一只猫"}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10040,"block_id":"x1","content":{"thinking_block":{}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10011,"block_id":"r1","content":{"research_block":{"summary":"检索到 3 篇资料"}}}]}}]}
+

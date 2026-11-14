@@ -11,9 +11,18 @@ doubao2api-data.json
 .recon/
 extract/
 
-# Python 缓存
+# Python 缓存 / 工具缓存
 __pycache__/
 *.pyc
+.ruff_cache/
+
+# 测试与覆盖率产物
+coverage.out
+coverage.html
+*.test
+
+# docker-compose 的挂载目录（含状态文件，等同账号密码）
+data/
 
 # 编辑器 / 系统
 .idea/

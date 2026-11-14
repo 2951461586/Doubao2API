@@ -1,0 +1,11 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"700"}}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content":"{\"text\":\"补丁文本\"}"}}]}
+
+event: STREAM_CHUNK
+data: {"content":{"content_block":[{"block_type":10000,"block_id":"p1","content":{"text_block":{"text":"-内嵌块"}}}]}}
+
+event: CHUNK_DELTA
+data: {"text":"多行\ndata 事件"}

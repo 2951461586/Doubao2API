@@ -1,0 +1,11 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"38445411928226562"}}
+
+event: STREAM_MSG_NOTIFY
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10000,"block_id":"b1","is_finish":false,"content":{"text_block":{"text":"你好"}}}]}}]}
+
+event: CHUNK_DELTA
+data: {"text":"，世界"}
+
+event: SSE_REPLY_END
+data: {}

@@ -1,0 +1,12 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"500"}}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10075,"block_id":"m1","content":{"lyrics_to_songs_music_block":{"task_nums":1,"lyrics_to_songs_music_content":{"video_id":"vid-123","title":"夏天的风","duration":32.5,"cover_uri":"tos-cn-i-1/cover"}}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10075,"block_id":"m1","content":{"lyrics_to_songs_music_block":{"task_nums":1,"lyrics_to_songs_music_content":{"video_id":"vid-123","title":"夏天的风","duration":32.5}}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10030,"block_id":"a1","content":{"artifact_block":{"resource_id":"res-1","resource_type":2,"title":"季度报告","status":2}}}]}}]}
+

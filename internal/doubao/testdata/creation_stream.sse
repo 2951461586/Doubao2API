@@ -1,0 +1,14 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"400"}}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":2074,"block_id":"i1","content":{"creation_block":{"creations":[{"id":"c-1","type":1,"image":{"key":"tos-cn-i-1/1","image_ori":{"url":"https://cdn.example.com/1.png","width":2048,"height":2048}}}]}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":2074,"block_id":"i1","content":{"creation_block":{"creations":[{"id":"c-1","type":1,"image":{"key":"tos-cn-i-1/1","image_ori":{"url":"https://cdn.example.com/1.png","width":2048,"height":2048}}}]}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10010,"block_id":"i2","content":{"gen_image_block":{"images":[{"id":"g-1","url":"https://cdn.example.com/2.png"}]}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10010,"block_id":"i2","content":{"gen_image_block":{"images":[{"id":"g-1","url":"https://cdn.example.com/2.png"}]}}}]}}]}

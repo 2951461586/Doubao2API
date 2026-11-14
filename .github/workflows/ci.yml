@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: fmt / vet / race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # go.mod 无 require，这一步是显式的「零依赖」守卫：
+      # 一旦有人加了第三方依赖，构建阶段就需要联网，这里会先失败给出信号。
+      - name: Verify zero dependencies
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "::error::go.mod 出现 require，请确认是否真的需要第三方依赖"
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "::error::以下文件未格式化（本地执行 make fmt）"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (-race)
+        run: go test -race -count=1 ./...
+
+      - name: coverage
+        run: |
+          go test -count=1 -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -20
+
+  build:
+    name: build (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath \
+            -ldflags="-s -w -X main.version=${GITHUB_SHA::7}" \
+            -o doubao2api .
+          ls -lh doubao2api
+
+      - name: Docker build
+        run: docker build -t doubao2api:ci .

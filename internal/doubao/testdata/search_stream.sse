@@ -1,0 +1,11 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"200"}}
+
+event: STREAM_MSG_NOTIFY
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10004,"block_id":"s1","content":{"search_query_block":{"query":"豆包是什么"}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10025,"block_id":"s2","content":{"search_query_result_block":{"summary":"豆包是字节跳动的 AI 助手","results":[{"title":"豆包官网","url":"https://www.doubao.com/chat/","snippet":"豆包是字节跳动推出的 AI 助手","site_name":"doubao.com"},{"title":"豆包百科","url":"https://baike.example.com/doubao","site_name":"example.com"}]}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10056,"block_id":"s3","content":{"reference_block":{"links":[{"title":"参考站","url":"https://ref.example.com/a"}]}}}]}}]}

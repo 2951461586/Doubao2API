@@ -1,0 +1,5 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"600"}}
+
+event: STREAM_ERROR
+data: {"error_code":710020202,"error_msg":"common invalid param"}

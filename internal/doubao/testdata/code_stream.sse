@@ -1,0 +1,11 @@
+event: SSE_ACK
+data: {"ack_client_meta":{"conversation_id":"300"}}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10008,"block_id":"c1","is_finish":false,"content":{"code_block":{"code":"print(1)","type":1}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10008,"block_id":"c1","is_finish":true,"content":{"code_block":{"code":"print(1)","type":1}}}]}}]}
+
+event: STREAM_CHUNK
+data: {"patch_op":[{"patch_value":{"content_block":[{"block_type":10008,"block_id":"c1","is_finish":true,"content":{"code_block":{"code":"print(1)","type":1}}}]}}]}
