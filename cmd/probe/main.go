@@ -69,6 +69,7 @@ func main() {
 	inSkill := flag.String("inputskill", "", "ext.input_skill（技能入参 JSON，配合 -chat）")
 	base := flag.String("base", doubao.UpstreamBase, "上游 host（如 https://accounts.doubao.com）")
 	nosec := flag.Bool("nosec", false, "不附加豆包公参（passport 等接口用）")
+	maxOut := flag.Int("max", 200000, "JSON 打印上限（字节，0 = 不截断）")
 	flag.Parse()
 
 	st, err := store.Open(*data)
@@ -208,8 +209,17 @@ func main() {
 	var v any
 	if json.Unmarshal(raw, &v) == nil {
 		out, _ := json.MarshalIndent(v, "", "  ")
-		if len(out) > 12000 {
-			out = out[:12000]
+		// 截断时只输出完整行，并把提示写到 stderr：
+		// 早先直接按字节截断会把 "\uXXXX" 转义切开，输出变成非法 JSON，
+		// 管道里的解析器会误判成「上游返回格式异常」。
+		if *maxOut > 0 && len(out) > *maxOut {
+			cut := *maxOut
+			if i := bytes.LastIndexByte(out[:cut], '\n'); i > 0 {
+				cut = i
+			}
+			os.Stdout.Write(out[:cut])
+			fmt.Printf("\n…已截断（%d/%d 字节）：用 -max 0 打印完整响应\n", cut, len(out))
+			return
 		}
 		os.Stdout.Write(out)
 		fmt.Println()
