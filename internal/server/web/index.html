@@ -136,10 +136,10 @@
     </div>
     <nav class="nav" id="nav">
       <button data-tab="overview" class="on"><span class="ico">▦</span>概览</button>
-      <button data-tab="accounts"><span class="ico">◉</span>账号池<span class="count" id="navPendingCheckin" hidden></span></button>
+      <button data-tab="accounts"><span class="ico">◉</span>账号池<span class="count" data-pending-checkin hidden></span></button>
       <button data-tab="keys"><span class="ico">⚿</span>密钥</button>
       <button data-tab="models"><span class="ico">✦</span>模型与技能</button>
-      <button data-tab="rewards"><span class="ico">◎</span>积分与任务</button>
+      <button data-tab="rewards"><span class="ico">◎</span>积分与任务<span class="count" data-pending-checkin hidden></span></button>
       <button data-tab="conversations"><span class="ico">▤</span>会话</button>
       <button data-tab="logs"><span class="ico">☰</span>日志</button>
       <button data-tab="settings"><span class="ico">⚙</span>设置</button>
@@ -497,14 +497,17 @@
   // updatePendingBadge 把「待确认签到」数量同步到侧边栏角标。
   //
   // 角标只做提醒：数量为 0 时隐藏；具体哪几个账号在账号池的「待确认签到」列里。
+  // 用 data-pending-checkin 标记而不是固定 id，新增入口只需在按钮里加同一个属性。
   function updatePendingBadge(accts){
     var n = (accts||[]).filter(function(a){ return a.pending_checkin_date || a.pending_checkin_at; }).length;
-    var b = $("#navPendingCheckin");
-    if (!b) return;
-    b.hidden = n === 0;
-    b.textContent = n > 99 ? "99+" : String(n);
-    b.title = n ? (n + " 个账号的签到待上游确认。" +
+    var text = n > 99 ? "99+" : String(n);
+    var title = n ? (n + " 个账号的签到待上游确认。" +
       "在「设置」里开启「待确认签到每小时复查」后会自动补写；也可在积分页点「催办签到」立即复查。") : "";
+    $$("[data-pending-checkin]").forEach(function(b){
+      b.hidden = n === 0;
+      b.textContent = text;
+      b.title = title;
+    });
   }
   function renderAccounts(d){
     var tb = $("#accounts"); tb.textContent = "";
