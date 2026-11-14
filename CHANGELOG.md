@@ -32,6 +32,20 @@
 - `/v1/models` 的自定义别名顺序不再随机（map 遍历顺序导致抖动）。
 - 自定义别名支持**别名链**（含环路保护与深度上限），并统一大小写归一化。
 
+### Fixed（积分 / 签到，实测发现）
+
+- `/v1/checkin`：上游 `/alice/ug/campaign/landing/checkin` 已废弃（恒返回
+  `710010702 system error`），改走活动任务路径（`daily_signin`：
+  `event/report` 创建实例 + 奖励领取），旧接口保留为回退。
+- 领取结果分类：`biz_error.code=3`（「领取结果确认中」）此前被当成失败，
+  现在映射为 `pending` 并做有限重试；`ClaimResult.status` 增加 `pending`，
+  `claim-completed` 返回 `pending_count` / `failed_count`，
+  `/v1/checkin` 返回 `pending` 字段。
+- `CampaignTask` 增加 `daily_checkin`（`checked_in_today` / `continuous_days` /
+  `last_checkin_date` / `reward`），`/v1/tasks` 可直接判断今天是否已签到。
+- `/v1/checkin` 只在 `checked_in && !pending` 时写入账号签到日期，
+  避免「已受理待确认」被误记成今天已签到。
+
 ### Added
 
 - `internal/ids`：随机标识叶子包（UUID / 十六进制 / 数字串）。

@@ -73,16 +73,19 @@ func (s *Server) runAutoRewards(ctx context.Context) {
 			cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 			results, _, err := s.Up.ClaimCompletedCampaignRewards(cctx, a, incentivesGroup)
 			cancel()
-			claimed := 0
+			claimed, pending := 0, 0
 			for _, res := range results {
-				if res.Status == "claimed" {
+				switch res.Status {
+				case "claimed":
 					claimed++
+				case "pending":
+					pending++
 				}
 			}
 			if err != nil {
 				log.Printf("自动领取任务失败 %s: %v", a.Name, err)
-			} else if claimed > 0 {
-				log.Printf("自动领取任务 %s: %d 个奖励已领取", a.Name, claimed)
+			} else if claimed > 0 || pending > 0 {
+				log.Printf("自动领取任务 %s: %d 个已领取，%d 个确认中", a.Name, claimed, pending)
 			}
 		}
 

@@ -2,6 +2,7 @@ package doubao
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -73,12 +74,27 @@ type CheckinResult struct {
 	RewardCode     string `json:"reward_code,omitempty"`
 	RewardType     string `json:"reward_type,omitempty"`
 	RewardStatus   int    `json:"reward_status,omitempty"`
+	// Pending 表示上游已受理签到 / 领取，但奖励仍在异步确认（biz_code=3）。
+	Pending bool `json:"pending,omitempty"`
 }
 
 // CampaignReward 是一项任务奖励。
 type CampaignReward struct {
 	Amount int64  `json:"reward_amount"`
 	Type   string `json:"reward_type"`
+}
+
+// DailyCheckin 是「每日签到」任务附带的签到状态。
+//
+// 上游把它挂在 task_kind=daily_signin 的任务上，是判断「今天是否已签到」的
+// 唯一可靠来源（landing/checkin 接口已失效，见 DailyCheckIn 的说明）。
+type DailyCheckin struct {
+	CheckedInToday  bool   `json:"checked_in_today"`
+	ContinuousDays  int    `json:"continuous_days,omitempty"`
+	LastCheckinDate string `json:"last_checkin_date,omitempty"`
+	TotalDays       int    `json:"total_days,omitempty"`
+	RewardAmount    int64  `json:"reward_amount,omitempty"`
+	RewardType      string `json:"reward_type,omitempty"`
 }
 
 // CampaignTask 是激励任务 / 里程碑。
@@ -99,6 +115,8 @@ type CampaignTask struct {
 	Progress          map[string]any   `json:"progress,omitempty"`
 	RecommendPrompts  []string         `json:"recommend_prompts,omitempty"`
 	Claimable         bool             `json:"claimable"`
+	// DailyCheckin 仅当 TaskKind=daily_signin 时存在。
+	DailyCheckin *DailyCheckin `json:"daily_checkin,omitempty"`
 }
 
 // CampaignDetail 是活动详情。
@@ -113,7 +131,7 @@ type CampaignDetail struct {
 type ClaimResult struct {
 	CampaignCode string `json:"campaign_code"`
 	TaskID       string `json:"task_id,omitempty"`
-	Status       string `json:"status"` // claimed / skipped / failed
+	Status       string `json:"status"` // claimed / pending / skipped / failed
 	Reason       string `json:"reason,omitempty"`
 	Raw          any    `json:"raw,omitempty"`
 }
@@ -204,8 +222,86 @@ func (c *Client) CreditHistory(ctx context.Context, a *Account, cursor int64, si
 	return out, nil
 }
 
-// DailyCheckIn 执行每日签到（上游按天幂等）。
+// DailySigninItemCode 是激励活动里「每日签到」的活动码。
+const DailySigninItemCode = "daily_signin"
+
+// DailyCheckIn 执行每日签到。
+//
+// 上游旧接口 /alice/ug/campaign/landing/checkin 已失效：2026-11 实测对任意
+// body（含 campaign_group_code / campaign_code / params 包装 / task_id）都返回
+// `710010702 system error`。签到现在表现为激励活动里的 daily_signin 任务
+// （reward_mode=direct_claim）：先用 event/report 创建任务实例，再走奖励领取。
+//
+// 领取是异步的（上游回 biz_code=3「领取结果确认中」），因此结果可能是
+// Pending=true：请求已受理，奖励稍后到账。
 func (c *Client) DailyCheckIn(ctx context.Context, a *Account, scene string) (*CheckinResult, error) {
+	// 今天已签到则直接幂等返回，避免多余的上游写操作。
+	if st, err := c.dailyCheckinState(ctx, a); err == nil && st != nil && st.CheckedInToday {
+		return checkinFromState(st, true), nil
+	}
+
+	res, err := c.campaignCheckIn(ctx, a)
+	if err == nil {
+		return res, nil
+	}
+	// 活动路径不可用时回退到旧接口（上游若恢复仍可用）。
+	if legacy, lerr := c.legacyCheckIn(ctx, a, scene); lerr == nil {
+		return legacy, nil
+	}
+	return nil, err
+}
+
+// dailyCheckinState 从活动详情里取「每日签到」的状态块。
+func (c *Client) dailyCheckinState(ctx context.Context, a *Account) (*DailyCheckin, error) {
+	detail, err := c.CampaignDetail(ctx, a, IncentiveCampaignGroupV3)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range detail.Tasks {
+		if t.TaskKind == "daily_signin" && t.DailyCheckin != nil {
+			return t.DailyCheckin, nil
+		}
+	}
+	return nil, fmt.Errorf("活动里没有 daily_signin 任务")
+}
+
+// campaignCheckIn 走「创建任务实例 → 领取奖励」的签到路径。
+func (c *Client) campaignCheckIn(ctx context.Context, a *Account) (*CheckinResult, error) {
+	taskID, err := c.StartCampaignTask(ctx, a, IncentiveCampaignGroupV3, DailySigninItemCode)
+	if err != nil {
+		return nil, err
+	}
+	_, pending, err := c.claimWithRetry(ctx, a, taskID, IncentiveCampaignGroupV3, DailySigninItemCode, 3)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &CheckinResult{Pending: pending}
+	// 以任务详情里的 daily_checkin 为准回填（它才是「是否已签到」的权威状态）。
+	if st, serr := c.dailyCheckinState(ctx, a); serr == nil && st != nil {
+		res = checkinFromState(st, false)
+		res.Pending = pending
+	}
+	if res.CheckedIn {
+		res.CheckinDate = time.Now().Format("2006-01-02")
+	}
+	return res, nil
+}
+
+// checkinFromState 把活动状态映射为签到结果。
+func checkinFromState(st *DailyCheckin, idempotent bool) *CheckinResult {
+	return &CheckinResult{
+		CheckedIn:      st.CheckedInToday,
+		CheckinDate:    st.LastCheckinDate,
+		ContinuousDays: st.ContinuousDays,
+		Idempotent:     idempotent,
+		RewardAmount:   st.RewardAmount,
+		RewardType:     st.RewardType,
+	}
+}
+
+// legacyCheckIn 调用旧版签到接口（上游若废弃则恒返回 710010702）。
+func (c *Client) legacyCheckIn(ctx context.Context, a *Account, scene string) (*CheckinResult, error) {
 	body := map[string]any{}
 	if scene != "" {
 		body["scene"] = scene
@@ -296,17 +392,82 @@ func (c *Client) ClaimCampaignReward(ctx context.Context, a *Account, taskID, gr
 	if code := intOf(obj["code"]); code != 0 {
 		return obj, fmt.Errorf("领取失败 (code=%d): %s", code, truncate(firstNonEmpty(str(obj["message"]), str(obj["msg"])), 200))
 	}
-	// 上游业务错误放在 data.biz_error；客户端把 0/4/6 视为成功，其余为失败。
-	if data, ok := obj["data"].(map[string]any); ok {
-		if biz, ok := data["biz_error"].(map[string]any); ok {
-			code := intOf(biz["code"])
-			if code != 0 && code != 4 && code != 6 {
-				msg := firstNonEmpty(str(biz["message"]), str(data["toast"]), str(obj["message"]))
-				return obj, fmt.Errorf("领取失败 (biz_code=%d): %s", code, truncate(msg, 200))
-			}
-		}
+	if err := classifyClaimResult(obj); err != nil {
+		return obj, err
 	}
 	return obj, nil
+}
+
+// ErrClaimPending 表示上游已受理领取，但奖励仍在异步确认（biz_code=3）。
+//
+// 桌面端把这种情况提示成「领取结果确认中，请稍后重试」，它既不是成功也不是
+// 失败：调用方应稍后重试，或把状态如实回报为 pending。
+var ErrClaimPending = errors.New("领取结果确认中")
+
+// classifyClaimResult 把上游领取响应归类为 成功 / 确认中 / 失败。
+//
+// 客户端把 biz_code 的 0/4/6 视为成功；3 是「确认中」（异步发放）；
+// 其余都是真失败。此前把 3 当失败，导致签到被误报为错误。
+func classifyClaimResult(obj map[string]any) error {
+	data, _ := obj["data"].(map[string]any)
+	biz, ok := data["biz_error"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	code := intOf(biz["code"])
+	msg := truncate(firstNonEmpty(str(biz["message"]), str(data["toast"]), str(obj["message"])), 200)
+	switch code {
+	case 0, 4, 6:
+		return nil
+	case 3:
+		return fmt.Errorf("%w: %s", ErrClaimPending, msg)
+	default:
+		return fmt.Errorf("领取失败 (biz_code=%d): %s", code, msg)
+	}
+}
+
+// claimWithRetry 领取奖励；遇到「确认中」时短暂重试。
+//
+// 返回的 pending 为 true 表示重试用尽仍在上游确认中（并非失败）。
+func (c *Client) claimWithRetry(ctx context.Context, a *Account, taskID, group, itemCode string, attempts int) (map[string]any, bool, error) {
+	if attempts <= 0 {
+		attempts = 3
+	}
+	var lastRaw map[string]any
+	for i := 0; i < attempts; i++ {
+		raw, err := c.ClaimCampaignReward(ctx, a, taskID, group, itemCode)
+		lastRaw = raw
+		if err == nil {
+			return raw, false, nil
+		}
+		if !errors.Is(err, ErrClaimPending) {
+			return raw, false, err
+		}
+		// 上游异步发放：等待后重试；ctx 取消则按 pending 返回。
+		if sleepErr := sleepCtx(ctx, 1500*time.Millisecond); sleepErr != nil {
+			return raw, true, nil
+		}
+	}
+	return lastRaw, true, nil
+}
+
+// parseDailyCheckin 解析任务里的 daily_checkin 状态块。
+func parseDailyCheckin(v any) *DailyCheckin {
+	m, ok := v.(map[string]any)
+	if !ok || m == nil {
+		return nil
+	}
+	out := &DailyCheckin{
+		CheckedInToday:  truthy(m["checked_in_today"]),
+		ContinuousDays:  intOf(m["continuous_days"]),
+		LastCheckinDate: str(m["last_checkin_date"]),
+		TotalDays:       intOf(m["total_days"]),
+	}
+	if rw, ok := m["reward"].(map[string]any); ok {
+		out.RewardAmount = int64(intOf(rw["reward_amount"]))
+		out.RewardType = str(rw["reward_type"])
+	}
+	return out
 }
 
 // ClaimCompletedCampaignRewards 自动领取「已完成」或「直接领取」的任务奖励。
@@ -339,23 +500,22 @@ func (c *Client) ClaimCompletedCampaignRewards(ctx context.Context, a *Account, 
 			})
 			continue
 		}
-		raw, err := c.ClaimCampaignReward(ctx, a, taskID, firstNonEmpty(t.CampaignGroupCode, groupCode), t.CampaignCode)
-		if err != nil {
-			results = append(results, ClaimResult{
-				CampaignCode: t.CampaignCode,
-				TaskID:       taskID,
-				Status:       "failed",
-				Reason:       err.Error(),
-				Raw:          raw,
-			})
-		} else {
-			results = append(results, ClaimResult{
-				CampaignCode: t.CampaignCode,
-				TaskID:       taskID,
-				Status:       "claimed",
-				Raw:          raw,
-			})
+		// 上游对领取是异步确认的（biz_code=3），因此这里带短重试，
+		// 重试用尽仍确认中时回报 pending，而不是 failed。
+		raw, pending, err := c.claimWithRetry(ctx, a, taskID,
+			firstNonEmpty(t.CampaignGroupCode, groupCode), t.CampaignCode, 3)
+		res := ClaimResult{CampaignCode: t.CampaignCode, TaskID: taskID, Raw: raw}
+		switch {
+		case err != nil:
+			res.Status = "failed"
+			res.Reason = err.Error()
+		case pending:
+			res.Status = "pending"
+			res.Reason = "上游仍在异步确认（biz_code=3），稍后重试即可"
+		default:
+			res.Status = "claimed"
 		}
+		results = append(results, res)
 		if err := sleepCtx(ctx, 350*time.Millisecond); err != nil {
 			return results, detail, err
 		}
@@ -399,6 +559,7 @@ func parseCampaignTasks(items []any) []CampaignTask {
 				t.RecommendPrompts = append(t.RecommendPrompts, s)
 			}
 		}
+		t.DailyCheckin = parseDailyCheckin(m["daily_checkin"])
 		t.Claimable = t.Status == TaskStatusCompleted || t.RewardMode == RewardModeDirectClaim
 		if t.Status == TaskStatusRewarded {
 			t.Claimable = false

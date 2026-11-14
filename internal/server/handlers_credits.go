@@ -128,8 +128,9 @@ func (s *Server) handleCheckin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 签到结果落到账号状态里，控制台与 /v1/credits 都会读它。
-	if acct != nil {
+	// 只有真正签到成功才写账号状态：上游可能返回「已受理待确认」
+	// （pending），此时不能把日期写死，否则会误判为今天已签到。
+	if acct != nil && result.CheckedIn && !result.Pending {
 		date := result.CheckinDate
 		if date == "" {
 			date = todayString()
@@ -255,6 +256,8 @@ func (s *Server) handleTaskClaimCompleted(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":            true,
 		"claimed_count": countClaimed(results),
+		"pending_count": countByStatus(results, "pending"),
+		"failed_count":  countByStatus(results, "failed"),
 		"results":       results,
 		"detail":        detail,
 	})
@@ -323,6 +326,17 @@ func countClaimed(results []doubao.ClaimResult) int {
 	n := 0
 	for _, r := range results {
 		if r.Status == "claimed" {
+			n++
+		}
+	}
+	return n
+}
+
+// countByStatus 统计指定状态的领取结果数（pending / failed / skipped）。
+func countByStatus(results []doubao.ClaimResult, status string) int {
+	n := 0
+	for _, r := range results {
+		if r.Status == status {
 			n++
 		}
 	}

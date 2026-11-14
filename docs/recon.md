@@ -281,9 +281,15 @@ GET /passport/safe/csrf_token/?aid=…&device_id=…
 
 - `GET /v1/credits`：调用 `/commerce/benefit_supply/credit/get_credit_num_optional_tasks`，
   返回 `credit.total_credit_num`、每日登录任务与积分规则链接。
-- `POST /v1/checkin`：调用 `/alice/ug/campaign/landing/checkin`，按天幂等；
-  实测返回 `reward_type=quota_grant`、`reward_amount=200`、`continuous_days`、
-  `checkin_date`、`idempotent`。
+- `POST /v1/checkin`：**2026-11 起上游已废弃** `/alice/ug/campaign/landing/checkin`
+  （任意 body 都返回 `710010702 system error`）。现在签到表现为活动里的
+  `daily_signin` 任务（`task_kind=daily_signin`、`reward_mode=2` 直接领取）：
+  读取活动详情 → `POST /alice/ug/event/report`
+  （`scene=campaign_task_click`）创建任务实例 → `POST /alice/ug/campaign/item/reward/claim/`
+  领取。旧接口仅作为回退保留。
+  签到的权威状态在任务详情的 `daily_checkin` 里：
+  `checked_in_today` / `continuous_days` / `last_checkin_date` / `reward`。
+  因此 `/v1/tasks` 会直接带出 `daily_checkin`，可据此判断今天是否已签到。
 - `GET /v1/tasks`：调用 `/alice/ug/campaign/v3/detail/`，默认活动组为
   `pc_incentive_task_mvp_v3`；返回任务 / 里程碑、状态、奖励（`quota_grant`）与进度。
 - `POST /v1/tasks/claim`：调用 `/alice/ug/campaign/item/reward/claim/`，
@@ -293,6 +299,20 @@ GET /passport/safe/csrf_token/?aid=…&device_id=…
 
 任务状态：`1=created`、`2=completed`、`3=rewarded`、`4=in_progress`；
 领取模式：`1=complete_then_claim`、`2=direct_claim`。
+
+领取响应里的 `data.biz_error.code` 有三类语义（客户端同款）：
+
+| biz_code | 含义 | 网关映射 |
+| ---: | --- | --- |
+| `0` / `4` / `6` | 成功（4、6 是客户端认可的成功码） | `claimed` |
+| `3` | **领取结果确认中，请稍后重试**（异步发放） | `pending`（短暂重试 3 次后仍为 3 就如实回报） |
+| 其它 | 真失败 | `failed` |
+
+> **已知上游限制（2026-11-14 实测）**：`daily_signin` 任务能创建实例
+> （`task_status=4 in_progress`）、能提交领取，但领取恒返回 `biz_code=3`，
+> 且 `daily_checkin.checked_in_today` 始终为 `false` —— 说明**真正的签到动作
+> 上游没有再执行**（旧接口 `landing/checkin` 就是那个动作）。网关无法伪造该动作，
+> 因此 `/v1/checkin` 会如实返回 `pending=true`；等上游恢复后无需改代码即可生效。
 
 自动执行（默认关闭）：
 
