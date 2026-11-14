@@ -10,10 +10,18 @@ import (
 //go:embed web/index.html
 var consoleHTML []byte
 
-// faviconICO 是控制台图标（16/32/48 三种尺寸），取自豆包客户端图标。
+// faviconICO 是控制台图标，取自豆包客户端图标。
+//
+// 内含 16/32/48/64/128/256 六个原生尺寸：只给到 48 时，高分屏标签页与
+// 任务栏会拿 48px 拉伸，看起来糊且偏小。
 //
 //go:embed web/favicon.ico
 var faviconICO []byte
+
+// appleTouchIconPNG 是 iOS 主屏图标（180×180 PNG，iOS 不认 ICO）。
+//
+//go:embed web/apple-touch-icon.png
+var appleTouchIconPNG []byte
 
 // serveConsole 输出控制台单页。
 //
@@ -26,6 +34,20 @@ func serveConsole(w http.ResponseWriter, _ *http.Request) {
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write(consoleHTML)
+}
+
+// serveAppleTouchIcon 输出 iOS 主屏图标。
+func serveAppleTouchIcon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "image/png")
+	h.Set("Cache-Control", "public, max-age=86400")
+	h.Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(appleTouchIconPNG)
 }
 
 // serveFavicon 输出控制台图标。

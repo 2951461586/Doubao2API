@@ -8,6 +8,11 @@
 
 ### Fixed
 
+- **控制台图标尺寸过小**：`favicon.ico` 之前只有 16/32/48 三帧，高分屏标签页与
+  任务栏会拿 48px 拉伸，显得模糊偏小。改用客户端图标的 16/32/48/64/128/256
+  **六档原生帧**（133 KB），并按 iOS 要求新增 180×180 `apple-touch-icon.png`
+  （iOS 不认 ICO）；页面 `rel="icon"` 的 `sizes` 同步，两个资源均为
+  `public, max-age=86400`、仅 GET/HEAD。
 - **上游业务错误被当成账号故障**：`withAccountRetry` / `withAccount` 曾把任意上游错误
   都记到使用的账号上。线上实测后果：积分活动下线后 `/v1/tasks` 回
   `code=2 campaign not found`，三个账号全被标红、`/health` 报 `ready: 0`，

@@ -79,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 
 	// 控制台图标：浏览器自动请求，无需鉴权。
 	mux.HandleFunc("/favicon.ico", serveFavicon)
+	mux.HandleFunc("/apple-touch-icon.png", serveAppleTouchIcon)
 
 	mux.HandleFunc("/", s.handleRoot)
 
